@@ -30,3 +30,17 @@
 *.exe
 *.out
 *.app
+
+# vscode
+.vscode
+
+# python
+__pycache__
+
+# built
+hakes/install
+hakes/deps/install
+hakes/index/hakes_index
+hakes/index/gen_base_params
+hakes/serving/fnr-worker/hakes-be-server
+hakes/serving/fnr-worker/hakes-server

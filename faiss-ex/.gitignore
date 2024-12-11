@@ -1,0 +1,72 @@
+# Prerequisites
+*.d
+
+# Compiled Object files
+*.slo
+*.lo
+*.o
+*.obj
+
+# Precompiled Headers
+*.gch
+*.pch
+
+# Compiled Dynamic libraries
+*.so
+*.dylib
+*.dll
+
+# Fortran module files
+*.mod
+*.smod
+
+# Compiled Static libraries
+*.lai
+*.la
+*.a
+*.lib
+
+# Executables
+*.exe
+*.out
+*.app
+
+# faiss
+*.swp
+*.swo
+*.o
+*.a
+*.dSYM
+*.so
+*.dylib
+*.pyc
+*~
+/config.*
+/aclocal.m4
+/autom4te.cache/
+/makefile.inc
+/bin/
+/c_api/bin/
+/c_api/gpu/bin/
+/tests/test
+/tests/gtest/
+faiss/python/swigfaiss_avx2.swig
+faiss/python/swigfaiss_avx512.swig
+
+# data
+data/
+results/
+
+# build
+bin/
+build/
+*.bin
+main
+*.gt
+out*.txt
+CMakeFiles/
+CMakeCache.txt
+install/
+
+# vscode
+.vscode/

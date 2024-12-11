@@ -1,0 +1,6 @@
+[submodule "serving/deps/llhttp"]
+	path = serving/deps/llhttp
+	url = https://github.com/nodejs/llhttp.git
+[submodule "serving/deps/libuv"]
+	path = serving/deps/libuv
+	url = https://github.com/libuv/libuv.git
