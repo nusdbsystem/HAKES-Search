@@ -2,7 +2,11 @@
 
 HAKES: Scalable Vector Database for Embedding Search Service
 
-This code repository is a cleaned version prepared for VLDB2025 submission
+This code repository is a cleaned version prepared for VLDB2025 submission.
+
+## Extended version
+
+The folder [./extended-version](./extended-version/) contains the extended version of the submission with additional discussion and experimental results.
 
 ## Code structure
 
