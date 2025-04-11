@@ -118,6 +118,7 @@ set(FAISS_SRC
   ext/IndexIVFPQFastScanL.cpp
   ext/IndexRefineL.cpp
   ext/index_io_ext.cpp
+  ext/io_ext.cpp
   ext/HakesIndex.cpp
 )
 
@@ -254,8 +255,10 @@ set(FAISS_HEADERS
   ext/IndexIVFPQFastScanL.h
   ext/IndexRefineL.h
   ext/index_io_ext.h
+  ext/io_ext.h
   ext/utils.h
   ext/HakesIndex.h
+  ext/TagChecker.h
 )
 
 if(NOT WIN32)

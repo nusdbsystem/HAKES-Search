@@ -1,6 +1,6 @@
 """
-  This file contains the message format for the client and server to communicate.
-  ref: faiss-ex/serving/message
+This file contains the message format for the client and server to communicate.
+ref: faiss-ex/serving/message
 """
 
 import numpy as np
@@ -108,7 +108,12 @@ def parse_search_response(resp: Dict, filter_invalid: bool = True) -> Dict:
         pa = resp["pas"]
         pa = bytes.fromhex(pa)
         pa = np.frombuffer(pa, dtype=np.int64).reshape(n, -1)
-        resp["pas"] = pa
+        valid_pas = [[] for _ in range(n)]
+        for i in range(n):
+            for j in range(k):
+                if ids[i][j] != -1:
+                    valid_pas[i].append(pa[i][j])
+        resp["pas"] = valid_pas
     return resp
 
 
@@ -137,6 +142,18 @@ def prepare_rerank_request(
         .hex(),
     }
     return data
+
+
+def prepare_delete_request(n: int, ids: np.ndarray):
+    data = {
+        "n": n,
+        "ids": np.ascontiguousarray(ids, dtype="<q").tobytes().hex(),
+    }
+    return data
+
+
+def parse_delete_response(resp: Dict) -> Dict:
+    return {"status": resp["status"], "msg": resp["msg"]}
 
 
 def parse_get_index_response(resp: Dict) -> Dict:

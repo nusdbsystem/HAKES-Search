@@ -8,6 +8,15 @@ This code repository is a cleaned version prepared for VLDB2025 submission.
 
 The folder [./extended-version](./extended-version/) contains the extended version of the submission with additional discussion and experimental results.
 
+## Code update
+
+Training extended to support Euclidean distance.
+Update the index loading and saving.
+The serving for filter stage index and refine stage index is decoupled.
+The client support for decouple deployment and IndexWorkerGroup is added.
+The deletion support by tombstone is added (vector removal during checkpoint not yet migrated).
+Removal of unused codes.
+
 ## Code structure
 
 HAKES repo include the following parts

@@ -35,7 +35,7 @@ class FnREngine {
   FnREngine(FnREngine&&) = delete;
   FnREngine& operator=(FnREngine&&) = delete;
 
-  virtual bool Initialize(const std::string& index_path, bool pa_mode,
+  virtual bool Initialize(const std::string& index_path, int mode, bool pa_mode,
                           uint64_t cap = 0) = 0;
 
   virtual bool IsInitialized() = 0;
@@ -45,6 +45,8 @@ class FnREngine {
   virtual bool Search(const std::string& request, std::string* response) = 0;
 
   virtual bool Rerank(const std::string& request, std::string* response) = 0;
+
+  virtual bool Delete(const std::string& request, std::string* response) = 0;
 
   virtual bool Checkpoint() = 0;
 

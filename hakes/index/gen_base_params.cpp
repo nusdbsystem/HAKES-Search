@@ -21,6 +21,7 @@
 #include <faiss/IndexPreTransform.h>
 #include <faiss/IndexRefine.h>
 #include <faiss/ext/index_io_ext.h>
+#include <faiss/impl/io.h>
 #include <faiss/index_io.h>
 
 #include <chrono>
@@ -38,23 +39,24 @@ namespace {
 
 // benchmark configuration
 struct Config {
-  size_t data_n;
-  size_t data_num_query;
-  size_t data_dim;
+  uint64_t data_n;
+  uint64_t data_num_query;
+  uint64_t data_dim;
   std::string data_train_path;
   // index params
-  size_t opq_out = 32;
-  size_t m = 32;
-  size_t nlist = 1024;
+  uint64_t opq_out = 32;
+  uint64_t m = 32;
+  uint64_t nlist = 1024;
+  faiss::MetricType metric = faiss::METRIC_INNER_PRODUCT;
   std::string index_save_path = "saved_index";
 };
 
 Config parse_config(int argc, char** argv) {
   Config cfg;
-  if (argc < 7) {
+  if (argc < 9) {
     std::cout << "Usage: " << argv[0]
               << "DATA_N DATA_DIM DATA_TRAIN_PATH OPQ_OUT M "
-                 "NLIST INDEX_SAVE_PATH"
+                 "NLIST METRIC INDEX_SAVE_PATH"
               << std::endl;
     exit(-1);
   }
@@ -65,7 +67,9 @@ Config parse_config(int argc, char** argv) {
   cfg.opq_out = std::stoul(argv[4]);
   cfg.m = std::stoul(argv[5]);
   cfg.nlist = std::stoul(argv[6]);
-  cfg.index_save_path = argv[7];
+  cfg.metric = (std::stoul(argv[7]) == 0) ? faiss::METRIC_INNER_PRODUCT
+                                          : faiss::METRIC_L2;
+  cfg.index_save_path = argv[8];
 
   // print summary
   std::cout << "DATA_N: " << cfg.data_n << std::endl;
@@ -90,10 +94,7 @@ Config parse_config(int argc, char** argv) {
   std::string dataset_name = cfg.data_train_path.substr(
       second_last_slash + 1, last_slash - second_last_slash - 1);
 
-  cfg.index_save_path =
-      cfg.index_save_path + "/base_" + dataset_name + "_OPQ" +
-      std::to_string(cfg.opq_out) + "_M" + std::to_string(cfg.m) + "_nlist" +
-      std::to_string(cfg.nlist) + "_hakesindex/" + faiss::ServingBaseIndexName;
+  cfg.index_save_path = cfg.index_save_path;
 
   std::cout << "Index path: " << cfg.index_save_path << std::endl;
 
@@ -115,7 +116,7 @@ int main(int argc, char** argv) {
   // load data
   float* data = nullptr;
   data = load_data(cfg.data_train_path.c_str(), d, n);
-  faiss::MetricType metric = faiss::METRIC_INNER_PRODUCT;
+  faiss::MetricType metric = cfg.metric;
 
   // create ivf pq index
   auto build_start = std::chrono::high_resolution_clock::now();
@@ -135,10 +136,9 @@ int main(int argc, char** argv) {
   auto build_end = std::chrono::high_resolution_clock::now();
   std::chrono::duration<double> build_diff = build_end - build_start;
   std::cout << "train time (s): " << build_diff.count() << std::endl;
-
-  faiss::write_hakes_vt_quantizers(cfg.index_save_path.c_str(), index.chain,
-                                  std::vector<faiss::VectorTransform*>{},
-                                  &quantizer, &base_index.pq);
+  std::unique_ptr<faiss::FileIOWriter> ff =
+      std::make_unique<faiss::FileIOWriter>(cfg.index_save_path.c_str());
+  faiss::save_init_params(ff.get(), &index.chain, &base_index.pq, &quantizer);
 
   // clean up
   delete[] data;

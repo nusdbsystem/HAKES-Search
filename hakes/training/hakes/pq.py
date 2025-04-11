@@ -1,4 +1,5 @@
 import copy
+import io
 import logging
 import numpy as np
 import os
@@ -56,15 +57,14 @@ class HakesPQ(torch.nn.Module):
         )
 
     @classmethod
-    def from_bin_file(cls, pq_file: str):
-        with open(pq_file, "rb") as f:
-            d = struct.unpack("<i", f.read(4))[0]
-            m = struct.unpack("<i", f.read(4))[0]
-            nbits = struct.unpack("<i", f.read(4))[0]
-            codebooks = np.frombuffer(
-                f.read(m * 2**nbits * d // m * 4), dtype="<f"
-            ).reshape(m, 2**nbits, d // m)
-            return cls(d, m, nbits, codebooks)
+    def from_reader(cls, reader: io.BufferedReader):
+        d = struct.unpack("<i", reader.read(4))[0]
+        m = struct.unpack("<i", reader.read(4))[0]
+        nbits = struct.unpack("<i", reader.read(4))[0]
+        codebooks = np.frombuffer(
+            reader.read(m * 2**nbits * d // m * 4), dtype="<f"
+        ).reshape(m, 2**nbits, d // m)
+        return cls(d, m, nbits, codebooks)
 
     def reduce_dim(self, target_d):
         if target_d % self.dsub != 0:
@@ -116,14 +116,7 @@ class HakesPQ(torch.nn.Module):
         quantized_vecs = quantized_vecs.view(batch_shape)  # (n, d)
         return quantized_vecs
 
-    def save(self, save_path):
-        logging.info(f"Saving PQ to {save_path}")
-        np.save(
-            os.path.join(save_path, "pq.npy"),
-            self.codebooks.detach().cpu().numpy(),
-        )
-
-    def save_as_bin(self, save_path, file_name="pq.bin"):
+    def save_to_writer(self, writer: io.BufferedWriter):
         """
         format: (little endian)
         d: int32
@@ -131,14 +124,12 @@ class HakesPQ(torch.nn.Module):
         nbits: int32
         codebooks: float32 array of shape (m, 2**nbits, d // m)
         """
-        logging.info(f"Saving PQ to {save_path}")
-        os.makedirs(save_path, exist_ok=True)
-        with open(os.path.join(save_path, file_name), "wb") as f:
-            f.write(struct.pack("<i", self.d))
-            f.write(struct.pack("<i", self.m))
-            f.write(struct.pack("<i", self.nbits))
-            f.write(
-                np.ascontiguousarray(
-                    self.codebooks.detach().cpu().numpy(), dtype="<f"
-                ).tobytes()
-            )
+        logging.info(f"Saving PQ")
+        writer.write(struct.pack("<i", self.d))
+        writer.write(struct.pack("<i", self.m))
+        writer.write(struct.pack("<i", self.nbits))
+        writer.write(
+            np.ascontiguousarray(
+                self.codebooks.detach().cpu().numpy(), dtype="<f"
+            ).tobytes()
+        )

@@ -28,12 +28,14 @@
 #include <faiss/utils/Heap.h>
 #include <unistd.h>
 
+#include <fstream>
+
 namespace faiss {
 template <class C>
 inline void reorder_2_heaps(idx_t n, idx_t k, idx_t* labels, float* distances,
                             idx_t k_base, const idx_t* base_labels,
                             const float* base_distances) {
-// #pragma omp parallel for
+  // #pragma omp parallel for
   for (idx_t i = 0; i < n; i++) {
     idx_t* idxo = labels + i * k;
     float* diso = distances + i * k;
@@ -51,7 +53,7 @@ inline void reorder_2_heaps(idx_t n, idx_t k, idx_t* labels, float* distances,
 inline size_t getCurrentRSS() {
   /* Linux ---------------------------------------------------- */
   long rss = 0L;
-  FILE *fp = NULL;
+  FILE* fp = NULL;
   if ((fp = fopen("/proc/self/statm", "r")) == NULL)
     return (size_t)0L; /* Can't open? */
   if (fscanf(fp, "%*s%ld", &rss) != 1) {
@@ -60,6 +62,11 @@ inline size_t getCurrentRSS() {
   }
   fclose(fp);
   return (size_t)rss * (size_t)sysconf(_SC_PAGESIZE);
+}
+
+inline bool IsFileExist(const std::string& file_path) {
+  std::ifstream infile(file_path);
+  return infile.good();
 }
 
 }  // namespace faiss

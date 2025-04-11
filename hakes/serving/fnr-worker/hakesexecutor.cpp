@@ -18,16 +18,16 @@
 
 namespace hakes {
 
-bool HakesExecutor::Initialize(const std::string& index_path, bool pa_mode, uint64_t cap) {
+bool HakesExecutor::Initialize(const std::string& index_path, int mode,
+                               bool pa_mode, uint64_t cap) {
   index_ = std::make_unique<faiss::HakesIndex>();
   index_->use_ivf_sq_ = true;
-  if (!index_->Initialize(index_path, pa_mode)) {
+  if (!index_->Initialize(index_path, mode, pa_mode)) {
     return false;
   }
   if (cap > 0) {
     index_->Reserve(cap);
   }
-  index_->base_index_->use_early_termination_ = false;
   return true;
 }
 
@@ -54,6 +54,8 @@ bool HakesExecutor::Add(const ExtendedAddRequest& request,
     success = index_->AddWithIds(request.n, request.d, request.vecs,
                                  static_cast<faiss::idx_t*>(request.ids),
                                  assign.get(), &vecs_t_d, &transformed_vecs);
+
+    printf("after addition: %d", index_->base_index_.get()->ntotal);
   }
 
   if (!success) {
@@ -186,6 +188,24 @@ bool HakesExecutor::Rerank(const RerankRequest& request,
   return true;
 }
 
+bool HakesExecutor::Delete(const DeleteRequest& request,
+                           DeleteResponse* response) {
+  {
+    std::shared_lock lock(params_mutex_);
+    if (!index_->DeletionEnabled()) {
+      lock.unlock();
+      std::unique_lock wl(params_mutex_);
+      if (!index_->DeletionEnabled()) {
+        index_->EnableDeletion();
+      }
+    }
+  }
+  index_->DeleteWithIds(request.n, request.ids);
+  response->status = true;
+  response->msg = "delete success";
+  return true;
+}
+
 bool HakesExecutor::Checkpoint(const std::string& checkpoint_path) {
   std::shared_lock lock(params_mutex_);
   return index_->Checkpoint(std::move(checkpoint_path));
@@ -221,7 +241,7 @@ bool HakesExecutor::UpdateIndexLocal(const std::string& local_path) {
   faiss::HakesIndex loaded;
   loaded.use_ivf_sq_ = true;
   loaded.Initialize(local_path);
-  index_->UpdateIndex(loaded);
+  index_->UpdateIndex(&loaded);
   return true;
 }
 

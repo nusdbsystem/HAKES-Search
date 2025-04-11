@@ -13,7 +13,7 @@ DEBUG_FLAGS = -g -fsanitize=address
 
 .PHONY: all
 
-all: hakes_index gen_base_params
+all: hakes_index gen_base_params 
 
 gen_base_params: gen_base_params.cpp
 	g++ -Ofast -lrt -std=c++17 -march=native -fpic -w -fopenmp -ftree-vectorize -ftree-vectorizer-verbose=0 $^ -o $@ -I. -I${HAKES_ROOT_DIR} ${FAISS_FLAGS} ${MKL_FLAGS} -pthread -lm -fopenmp
@@ -21,5 +21,8 @@ gen_base_params: gen_base_params.cpp
 hakes_index: hakes_index.cpp
 	g++-11 -Ofast -lrt -std=c++17 -march=native -fpic -w -fopenmp -ftree-vectorize -ftree-vectorizer-verbose=0 $^ -o $@ -I. -I${HAKES_ROOT_DIR} ${FAISS_FLAGS} ${MKL_FLAGS} -pthread -lm -fopenmp
 
+gen_empty_rindex: gen_empty_rindex.cpp
+	g++ -Ofast -lrt -std=c++17 -march=native -fpic -w -fopenmp -ftree-vectorize -ftree-vectorizer-verbose=0 $^ -o $@ -I. -I${HAKES_ROOT_DIR} ${FAISS_FLAGS} ${MKL_FLAGS} -pthread -lm -fopenmp
+
 clean:
-	rm -rf *.o hakes_index gen_base_params
+	rm -rf *.o hakes_index gen_base_params gen_empty_rindex

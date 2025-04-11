@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <cstdint>
+
 /*************************************************************
  * I/O macros
  *
@@ -17,13 +19,13 @@
 
 #define READANDCHECK(ptr, n)                         \
     {                                                \
-        size_t ret = (*f)(ptr, sizeof(*(ptr)), n);   \
+        uint64_t ret = (*f)(ptr, sizeof(*(ptr)), n);   \
         FAISS_THROW_IF_NOT_FMT(                      \
                 ret == (n),                          \
                 "read error in %s: %zd != %zd (%s)", \
                 f->name.c_str(),                     \
                 ret,                                 \
-                size_t(n),                           \
+                uint64_t(n),                           \
                 strerror(errno));                    \
     }
 
@@ -32,7 +34,7 @@
 // will fail if we write 256G of data at once...
 #define READVECTOR(vec)                                              \
     {                                                                \
-        size_t size;                                                 \
+        uint64_t size;                                                 \
         READANDCHECK(&size, 1);                                      \
         FAISS_THROW_IF_NOT(size >= 0 && size < (uint64_t{1} << 40)); \
         (vec).resize(size);                                          \
@@ -41,20 +43,20 @@
 
 #define READSTRING(s)                     \
     {                                     \
-        size_t size = (s).size();         \
+        uint64_t size = (s).size();         \
         WRITEANDCHECK(&size, 1);          \
         WRITEANDCHECK((s).c_str(), size); \
     }
 
 #define WRITEANDCHECK(ptr, n)                         \
     {                                                 \
-        size_t ret = (*f)(ptr, sizeof(*(ptr)), n);    \
+        uint64_t ret = (*f)(ptr, sizeof(*(ptr)), n);    \
         FAISS_THROW_IF_NOT_FMT(                       \
                 ret == (n),                           \
                 "write error in %s: %zd != %zd (%s)", \
                 f->name.c_str(),                      \
                 ret,                                  \
-                size_t(n),                            \
+                uint64_t(n),                            \
                 strerror(errno));                     \
     }
 
@@ -62,7 +64,7 @@
 
 #define WRITEVECTOR(vec)                   \
     {                                      \
-        size_t size = (vec).size();        \
+        uint64_t size = (vec).size();        \
         WRITEANDCHECK(&size, 1);           \
         WRITEANDCHECK((vec).data(), size); \
     }
@@ -72,17 +74,20 @@
 #define WRITEXBVECTOR(vec)                         \
     {                                              \
         FAISS_THROW_IF_NOT((vec).size() % 4 == 0); \
-        size_t size = (vec).size() / 4;            \
+        uint64_t size = (vec).size() / 4;            \
         WRITEANDCHECK(&size, 1);                   \
         WRITEANDCHECK((vec).data(), size * 4);     \
     }
 
-#define READXBVECTOR(vec)                                            \
-    {                                                                \
-        size_t size;                                                 \
-        READANDCHECK(&size, 1);                                      \
-        FAISS_THROW_IF_NOT(size >= 0 && size < (uint64_t{1} << 40)); \
-        size *= 4;                                                   \
-        (vec).resize(size);                                          \
-        READANDCHECK((vec).data(), size);                            \
+#define READXBVECTOR(vec)  \
+    {                     \
+        uint64_t size;    \
+        READANDCHECK(&size, 1); \
+        assert(size >= 0 && size < (uint64_t{1} << 40)); \
+        size *= 4;                                       \
+        (vec).resize(size);                              \
+        uint64_t batch_size = 1ULL<<20;                  \
+        for (uint64_t i = 0; i < size; i+= batch_size) { \
+            READANDCHECK((vec).data() + i, std::min(size - i, batch_size)); \
+        }                                       \
     }

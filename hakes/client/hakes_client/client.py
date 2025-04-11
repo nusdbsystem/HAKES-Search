@@ -13,11 +13,13 @@ from hakes_client.message import (
     prepare_rerank_request,
     parse_search_response,
     parse_extended_add_response,
+    prepare_delete_request,
+    parse_delete_response,
     parse_get_index_response,
     prepare_update_index_request,
     parse_update_index_response,
 )
-from hakes_client.cliconf import ClientConfig, ClientConfigPA
+from hakes_client.cliconf import ShardingBaselineConfig, ClientConfig, ClientConfigPA
 
 
 class Client:
@@ -38,7 +40,7 @@ class Client:
             return None
         return json.loads(response.text)
 
-    def addv3(
+    def add_ext(
         self,
         n: int,
         d: int,
@@ -71,8 +73,16 @@ class Client:
         require_pa: bool = False,
     ) -> Dict:
         data = prepare_search_request(
-            query.shape[0], query.shape[1], query, k, nprobe, k_factor, metric_type, require_pa,
+            query.shape[0],
+            query.shape[1],
+            query,
+            k,
+            nprobe,
+            k_factor,
+            metric_type,
+            require_pa,
         )
+        print(f"search data: {data}")
         try:
             response = requests.post(self.url + "/search", json=data)
         except Exception as e:
@@ -119,6 +129,20 @@ class Client:
             return None
         return parse_search_response(json.loads(response.text), filter_invalid)
 
+    def delete(self, n: int, ids: List[int]):
+        data = prepare_delete_request(n, ids)
+        try:
+            response = requests.post(self.url + "/delete", json=data)
+        except Exception as e:
+            logging.warning(f"delete failed on {self.url}: {e}")
+            return None
+        if response.status_code != 200:
+            logging.warning(
+                f"Failed to call server, status code: {response.status_code} {response.text}"
+            )
+            return None
+        return parse_delete_response(json.loads(response.text))
+
     def checkpoint(self) -> str:
         try:
             response = requests.post(self.url + "/checkpoint")
@@ -160,19 +184,19 @@ class Client:
         return parse_update_index_response(json.loads(response.text))
 
 
-class ClientV2:
+class ClientShardedHNSW:
     """
-    Client for distributed HakesService
+    Client for sharded HNSW baseline
     """
 
-    def __init__(self, cfg: ClientConfig):
+    def __init__(self, cfg: ShardingBaselineConfig):
         self.cfg = cfg
         self.clients = [Client(addr) for addr in cfg.addrs]
         self.pool = ThreadPoolExecutor(max_workers=1000)
 
     def add(self, n, d, vecs, ids):
         """
-        Add vectors to the distributed HakesService
+        Add vectors to the the designated shard and its hnsw index
         """
         # fast path for single request
         if n == 1:
@@ -215,7 +239,7 @@ class ClientV2:
         metric_type: int = 1,
     ):
         """
-        Search vectors in the distributed HakesService
+        Search vectors from all shards and merge the results
         """
         # send requests to each server with the threadpool
         futures = [
@@ -255,24 +279,28 @@ class ClientV2:
 
     def checkpoint(self):
         """
-        Checkpoint the distributed HakesService
+        Checkpoint
         """
         # send requests to each server with the threadpool
         futures = [self.pool.submit(client.checkpoint) for client in self.clients]
 
         # wait for all requests to finish and collect results
         results = [f.result() for f in futures]
-        # check if all requests are successful (TODO check how we see the response struct)
         for res in results:
             if res is None:
                 return None
         return results
 
 
-class ClientV3:
+class HakesClient:
     def __init__(self, cfg: ClientConfig):
         self.cfg = cfg
-        self.clients = [Client(addr) for addr in cfg.addrs]
+        # The most common case should be 1 index worker group
+        # and index workers in the group replicate the filter stage index
+        self.index_worker_groups = [
+            [Client(addr) for addr in group] for group in cfg.index_worker_groups
+        ]
+        self.refine_workers = [Client(addr) for addr in cfg.refine_workers]
         self.pool = ThreadPoolExecutor(max_workers=1000)
 
     def add(self, n, d, vecs, ids):
@@ -287,84 +315,100 @@ class ClientV3:
             return None
 
         # build vector batch for each client
-        vec_batches = [[] for _ in range(self.cfg.n)]
-        id_batches = [[] for _ in range(self.cfg.n)]
+        vec_batches = [[] for _ in range(self.cfg.refine_worker_count)]
+        id_batches = [[] for _ in range(self.cfg.refine_worker_count)]
         for i in range(n):
-            idx = self.cfg.get_server_id(ids[i])
-            vec_batches[idx].append(vecs[i])
-            id_batches[idx].append(ids[i])
+            refine_worker_idx = self.cfg.get_refine_worker_id(ids[i])
+            vec_batches[refine_worker_idx].append(vecs[i])
+            id_batches[refine_worker_idx].append(ids[i])
 
         # send requests to each server with the threadpool
-        futures = [
+        refine_worker_futures = [
             (
                 self.pool.submit(
-                    self.clients[i].addv3,
+                    self.refine_workers[i].add_ext,
                     len(vec_batches[i]),
                     d,
                     vec_batches[i],
                     id_batches[i],
+                    add_to_refine_only=True,
                 )
                 if len(vec_batches[i]) != 0
                 else None
             )
-            for i in range(self.cfg.n)
+            for i in range(self.cfg.refine_worker_count)
         ]
 
-        if self.cfg.n == 1:
-            return futures[0].result()
+        index_worker_vec_batches = [
+            [] for _ in range(self.cfg.index_worker_group_count)
+        ]
+        index_worker_id_batches = [[] for _ in range(self.cfg.index_worker_group_count)]
+        for i in range(n):
+            index_worker_group_idx = self.cfg.get_index_worker_group_id(ids[i])
+            index_worker_vec_batches[index_worker_group_idx].append(vecs[i])
+            index_worker_id_batches[index_worker_group_idx].append(ids[i])
 
-        # second round addition batch
-        id_ll = [[] for _ in range(self.cfg.n)]
-        assign_ll = [[] for _ in range(self.cfg.n)]
-        vecs_ll = [[] for _ in range(self.cfg.n)]
-        vecs_t_d = 0
-        # wait for all requests to finish and collect results
-        for i in range(len(futures)):
-            if futures[i] is None:
+        preferred_index_worker = self.cfg.get_preferred_id()
+        index_worker_future = [
+            (
+                self.pool.submit(
+                    self.index_worker_groups[i][preferred_index_worker].add_ext,
+                    len(index_worker_vec_batches[i]),
+                    d,
+                    index_worker_vec_batches[i],
+                    index_worker_id_batches[i],
+                )
+                if len(index_worker_vec_batches[i]) != 0
+                else None
+            )
+            for i in range(self.cfg.index_worker_group_count)
+        ]
+
+        index_worker_group_round2_futures = []
+        for i in range(self.cfg.index_worker_group_count):
+            index_worker_count = len(self.index_worker_groups[i])
+            vecs_t_d = 0
+            # wait for requests to the first round index worker finish
+            if index_worker_future[i] is None:
                 continue
-            res = futures[i].result()
+            res = index_worker_future[i].result()
             if res is None:
-                logging.warning(f"add failed on {self.clients[i].url}")
+                logging.warning(
+                    f"add failed on {self.index_worker_groups[i][preferred_index_worker].url}"
+                )
                 continue
             # add the transformed vectors to other servers
             assign = res["assign"]
             vecs_t_d = res["vecs_t_d"]
             transformed_vecs = res["vecs_t"]
-            # filter out the -1 entries
-            for j in range(self.cfg.n):
-                if i == j:
-                    # skip the server that we already added in step 1.
-                    continue
-                id_ll[j].extend(id_batches[i])
-                assign_ll[j].extend(assign)
-                vecs_ll[j].extend(transformed_vecs)
-        if vecs_t_d == 0:
-            logging.warning(f"all add failed")
-            return None
+            if vecs_t_d == 0:
+                logging.warning(f"add failed")
+                return None
 
-        # broadcast the transformed vectors to all the rest servers
-        futures = [
-            (
+            # broadcast the transformed vectors to all the rest servers
+            futures = []
+            for j in range(index_worker_count):
+                if j == preferred_index_worker:
+                    continue
                 self.pool.submit(
-                    self.clients[i].addv3,
-                    len(vecs_ll[i]),
+                    self.index_worker_groups[i][j].add_ext,
+                    len(index_worker_vec_batches[i]),
                     vecs_t_d,
-                    np.array(vecs_ll[i]),
-                    id_ll[i],
-                    assign_ll[i],
+                    np.array(transformed_vecs),
+                    index_worker_id_batches[i],
+                    assign,
                 )
-                if len(vecs_ll[i]) != 0
-                else None
-            )
-            for i in range(self.cfg.n)
-        ]
+            index_worker_group_round2_futures.append(futures)
+
+        # wait for all requests to finish and collect results
         results = []
-        for f in futures:
+        for f in refine_worker_futures:
             if f is not None:
                 results.append(f.result())
-        for res in results:
-            if res is None:
-                return None
+        for fs in index_worker_group_round2_futures:
+            for f in fs:
+                if f is not None:
+                    results.append(f.result())
         return results
 
     def search(
@@ -376,7 +420,7 @@ class ClientV3:
         metric_type: int = 1,
     ):
         """
-        Search vectors in the distributed HakesService V3
+        Search vectors in the distributed HakesService
         """
         if len(query.shape) != 2:
             logging.warning(f"search failed: query shape {query.shape} != 2")
@@ -385,31 +429,57 @@ class ClientV3:
         # send request to the preferred server
         preferred_server = self.cfg.get_preferred_id()
         # do not filter invalid entries as we need the shape for rerank
-        result = self.clients[preferred_server].search(
-            query, k, nprobe, k_factor, metric_type
-        )
-        if result is None:
-            return None
+        futures = [
+            self.pool.submit(
+                self.index_worker_groups[i][preferred_server].search,
+                query,
+                k,
+                nprobe,
+                k_factor,
+                metric_type,
+            )
+            for i in range(self.cfg.index_worker_group_count)
+        ]
+
+        results = [f.result() for f in futures]
+        print(f"results: {results}")
+        ids = [[] for _ in range(query.shape[0])]
+        scores = [[] for _ in range(query.shape[0])]
+        for j in range(query.shape[0]):
+            for i in range(self.cfg.index_worker_group_count):
+                if results[i] is None:
+                    continue
+                ids[j].extend(results[i]["ids"][j])
+                scores[j].extend(results[i]["scores"][j])
+            cur_idx = np.array(ids[j])
+            cur_score = np.array(scores[j])
+            idx = np.argsort(cur_score if metric_type == 1 else -cur_score)
+            ids[j] = cur_idx[idx]
+            scores[j] = cur_score[idx]
+            ids[j] = ids[j][: k * k_factor]
+            scores[j] = scores[j][: k * k_factor]
+
         # rerank the results split the results into their target servers
         nq = query.shape[0]
-        assert nq == len(result["ids"]) and nq == len(result["scores"])
 
         # build rerank requests input
-        base_id_batches = [[] for _ in range(self.cfg.n)]
-        base_dist_batches = [[] for _ in range(self.cfg.n)]
-        k_base_count_batches = [[0 for _ in range(nq)] for _ in range(self.cfg.n)]
+        base_id_batches = [[] for _ in range(self.cfg.refine_worker_count)]
+        base_dist_batches = [[] for _ in range(self.cfg.refine_worker_count)]
+        k_base_count_batches = [
+            [0 for _ in range(nq)] for _ in range(self.cfg.refine_worker_count)
+        ]
 
         for i in range(nq):
-            for j in range(len(result["ids"][i])):
-                server_idx = self.cfg.get_server_id(result["ids"][i][j])
-                base_id_batches[server_idx].append(result["ids"][i][j])
-                base_dist_batches[server_idx].append(result["scores"][i][j])
+            for j in range(len(ids[i])):
+                server_idx = self.cfg.get_refine_worker_id(ids[i][j])
+                base_id_batches[server_idx].append(ids[i][j])
+                base_dist_batches[server_idx].append(scores[i][j])
                 k_base_count_batches[server_idx][i] += 1
 
         # send rerank request to each server
         futures = [
             self.pool.submit(
-                self.clients[i].rerank,
+                self.refine_workers[i].rerank,
                 query,
                 k,
                 k_base_count_batches[i],
@@ -417,13 +487,13 @@ class ClientV3:
                 base_dist_batches[i],
                 metric_type,
             )
-            for i in range(self.cfg.n)
+            for i in range(self.cfg.refine_worker_count)
         ]
         results = [future.result() for future in futures]
 
         collated_id_ll = [[] for _ in range(nq)]
         collated_dist_ll = [[] for _ in range(nq)]
-        for i in range(self.cfg.n):
+        for i in range(self.cfg.refine_worker_count):
             if results[i] is None:
                 continue
             for j in range(nq):
@@ -441,31 +511,87 @@ class ClientV3:
             )
         return final_result
 
-    def checkpoint(self):
-        """
-        Checkpoint the distributed HakesService V3
-        """
-        # send requests to each server with the threadpool
-        futures = [self.pool.submit(client.checkpoint) for client in self.clients]
+    def delete(self, n, ids):
+        # issue delete to corresponding index worker group and refine worker
+        id_batches = [[] for _ in range(self.cfg.refine_worker_count)]
+        for i in range(n):
+            refine_worker_idx = self.cfg.get_refine_worker_id(ids[i])
+            id_batches[refine_worker_idx].append(ids[i])
 
+        # send requests to each server with the threadpool
+        refine_worker_futures = [
+            (
+                self.pool.submit(
+                    self.refine_workers[i].delete, len(id_batches[i]), id_batches[i]
+                )
+                if len(id_batches[i]) != 0
+                else None
+            )
+            for i in range(self.cfg.refine_worker_count)
+        ]
+
+        id_batches = [[] for _ in range(self.cfg.index_worker_group_count)]
+        for i in range(n):
+            index_worker_group_idx = self.cfg.get_index_worker_group_id(ids[i])
+            id_batches[index_worker_group_idx].append(ids[i])
+        index_worker_futures = [
+            (
+                self.pool.submit(
+                    client.delete,
+                    len(id_batches[i]),
+                    id_batches[i],
+                )
+                if len(id_batches[i]) != 0
+                else None
+            )
+            for i in range(self.cfg.index_worker_group_count)
+            for client in self.index_worker_groups[i]
+        ]
         # wait for all requests to finish and collect results
-        results = [f.result() for f in futures]
-        # check if all requests are successful (TODO check how we see the response struct)
+        results = [f.result() for f in refine_worker_futures]
+        for res in results:
+            if res is None:
+                return None
+        results = [f.result() for f in index_worker_futures]
         for res in results:
             if res is None:
                 return None
         return results
 
+    def checkpoint(self):
+        """
+        Checkpoint the distributed HakesService V3
+        """
+        # send requests to each server with the threadpool
+        refine_worker_futures = [
+            self.pool.submit(client.checkpoint) for client in self.refine_workers
+        ]
+        index_worker_futures = [
+            self.pool.submit(client.checkpoint)
+            for group in self.index_worker_groups
+            for client in group
+        ]
+
+        # wait for all requests to finish and collect results
+        results = [f.result() for f in refine_worker_futures]
+        for res in results:
+            if res is None:
+                return None
+        results = [f.result() for f in index_worker_futures]
+        return results
+
     def get_index(self) -> Tuple[int, HakesIndexParams]:
         preferred_server = self.cfg.get_preferred_id()
         # do not filter invalid entries as we need the shape for rerank
-        result = self.clients[preferred_server].get_index()
+        result = self.index_worker_groups[0][preferred_server].get_index()
         if result is None:
-            logging.warning(f"get_index failed on {self.clients[preferred_server].url}")
+            logging.warning(
+                f"get_index failed on {self.index_worker_groups[0][preferred_server].url}"
+            )
             return None
         if "index_version" not in result or "params" not in result:
             logging.warning(
-                f"get_index failed on {self.clients[preferred_server].url} ({result['msg']})"
+                f"get_index failed on {self.index_worker_groups[0][preferred_server].url} ({result['msg']})"
             )
             return None
         return result["index_version"], result["params"]
@@ -473,12 +599,13 @@ class ClientV3:
     def update_index(self, params: HakesIndexParams) -> int:
         # send requests to each server with the threadpool
         futures = [
-            self.pool.submit(client.update_index, params) for client in self.clients
+            self.pool.submit(client.update_index, params)
+            for group in self.index_worker_groups
+            for client in group
         ]
 
         # wait for all requests to finish and collect results
         results = [f.result() for f in futures]
-        # check if all requests are successful (TODO check how we see the response struct)
         index_version = -1
         for res in results:
             if (
@@ -492,7 +619,7 @@ class ClientV3:
         return index_version
 
 
-class ClientV3PA(ClientV3):
+class HakesClientPA(HakesClient):
 
     def __init__(self, cfg: ClientConfig):
         super().__init__(cfg)
@@ -501,22 +628,36 @@ class ClientV3PA(ClientV3):
         # fetch the index and build the partition allocation config
         self.index_version, index = self.get_index()
         self.vts = index.vts
+        self.cfg = ClientConfigPA(
+            self.cfg.index_worker_groups,
+            self.cfg.refine_workers,
+            index.vts,
+            index.ivf,
+            self.cfg.preference,
+        )
 
     # generate only once for a Hakes deployment such that partition allocation among nodes are fixed
     def init_and_export_pa_config(self, path=None):
         _, index = self.get_index()
         # use the fetched index to build the sharding config
-        cfg = ClientConfigPA(self.cfg.addrs, index.vts, index.ivf, self.cfg.preference)
+        cfg = ClientConfigPA(
+            self.cfg.index_worker_groups,
+            self.cfg.refine_workers,
+            index.vts,
+            index.ivf,
+            self.cfg.preference,
+        )
         if path is not None:
             cfg.save(path)
         self.cfg = cfg
+        self.vts = index.vts
         return cfg
-    
+
     def load_pa_config(self, path):
         cfg = ClientConfigPA.load(self.cfg, path)
         self.cfg = cfg
+        self.vts = cfg.vts
         return cfg
-    
 
     def add(self, n, d, vecs, ids):
         # find ivf allocations
@@ -527,51 +668,77 @@ class ClientV3PA(ClientV3):
         vecs_t = self.vts.apply(vecs)
 
         # build batches based on partitions
-        vec_batches = [[] for _ in range(self.cfg.n)]
-        id_batches = [[] for _ in range(self.cfg.n)]
-        assign_batches = [[] for _ in range(self.cfg.n)]
+        vec_batches = [[] for _ in range(self.cfg.refine_worker_count)]
+        id_batches = [[] for _ in range(self.cfg.refine_worker_count)]
+        assign_batches = [[] for _ in range(self.cfg.refine_worker_count)]
         for i in range(n):
-            idx = self.cfg.get_server_id(ivf_assign[i])
-            vec_batches[idx].append(vecs[i])
-            id_batches[idx].append(ids[i])
-            assign_batches[idx].append(ivf_assign[i])
+            refine_worker_idx = self.cfg.get_refine_worker_id(ivf_assign[i])
+            vec_batches[refine_worker_idx].append(vecs[i])
+            id_batches[refine_worker_idx].append(ids[i])
+            assign_batches[refine_worker_idx].append(ivf_assign[i])
 
         # send requests to each server with the threadpool
-        futures = [
+        refine_worker_futures = [
             (
                 self.pool.submit(
-                    self.clients[i].addv3,
+                    self.refine_workers[i].add_ext,
                     len(vec_batches[i]),
                     d,
                     vec_batches[i],
                     id_batches[i],
                     assign_batches[i],
-                    True,
+                    add_to_refine_only=True,
                 )
                 if len(vec_batches[i]) != 0
                 else None
             )
-            for i in range(self.cfg.n)
+            for i in range(self.cfg.refine_worker_count)
         ]
 
-        for i in range(len(futures)):
-            if futures[i] is not None and futures[i].result() is None:
-                logging.warning(f"add failed on {self.clients[i].url}")
-                return None
-
-        # add to base index
-        futures = [
-            self.pool.submit(
-                self.clients[i].addv3,
-                len(vecs),
-                vecs_t.shape[1],
-                vecs_t,
-                ids,
-                ivf_assign,
-            )
-            for i in range(self.cfg.n)
+        index_worker_vec_batches = [
+            [] for _ in range(self.cfg.index_worker_group_count)
         ]
-        return [f.result() for f in futures]
+        index_worker_id_batches = [[] for _ in range(self.cfg.index_worker_group_count)]
+        index_worker_assign_batches = [
+            [] for _ in range(self.cfg.index_worker_group_count)
+        ]
+        for i in range(n):
+            index_worker_group_idx = self.cfg.get_index_worker_group_id(ids[i])
+            index_worker_vec_batches[index_worker_group_idx].append(vecs_t[i])
+            index_worker_id_batches[index_worker_group_idx].append(ids[i])
+            index_worker_assign_batches[index_worker_group_idx].append(ivf_assign[i])
+
+        preferred_index_worker = self.cfg.get_preferred_id()
+        index_worker_group_futures = []
+        for i in range(self.cfg.index_worker_group_count):
+            index_worker_count = len(self.index_worker_groups[i])
+            futures = [
+                (
+                    self.pool.submit(
+                        self.index_worker_groups[i][j].add_ext,
+                        len(index_worker_vec_batches[i]),
+                        vecs_t.shape[1],
+                        index_worker_vec_batches[i],
+                        index_worker_id_batches[i],
+                        index_worker_assign_batches[i],
+                    )
+                    if len(index_worker_vec_batches[i]) != 0
+                    else None
+                )
+                for j in range(index_worker_count)
+            ]
+            index_worker_group_futures.append(futures)
+
+        # wait for all futures to finish
+        results = []
+        for f in refine_worker_futures:
+            if f is not None:
+                results.append(f.result())
+        for fs in index_worker_group_futures:
+            for f in fs:
+                if f is not None:
+                    results.append(f.result())
+        return results
 
     def search(
         self,
@@ -581,30 +748,72 @@ class ClientV3PA(ClientV3):
         k_factor: int = 1,
         metric_type: int = 1,
     ):
-        prefered_server = self.cfg.get_preferred_id()
-        result = self.clients[prefered_server].search(
-            query, k, nprobe, k_factor, metric_type, require_pa=True
-        )
-        if result is None:
+        if len(query.shape) != 2:
+            logging.warning(f"search failed: query shape {query.shape} != 2")
             return None
+
+        preferred_server = self.cfg.get_preferred_id()
+        futures = [
+            self.pool.submit(
+                self.index_worker_groups[i][preferred_server].search,
+                query,
+                k,
+                nprobe,
+                k_factor,
+                metric_type,
+                require_pa=True,
+            )
+            for i in range(self.cfg.index_worker_group_count)
+        ]
+        results = [f.result() for f in futures]
+        print(f"results: {results}")
+
+        ids = [[] for _ in range(query.shape[0])]
+        scores = [[] for _ in range(query.shape[0])]
+        pas = [[] for _ in range(query.shape[0])]
+        for j in range(query.shape[0]):
+            for i in range(self.cfg.index_worker_group_count):
+                if results[i] is None:
+                    continue
+                ids[j].extend(results[i]["ids"][j])
+                scores[j].extend(results[i]["scores"][j])
+                pas[j].extend(results[i]["pas"][j])
+            cur_idx = np.array(ids[j])
+            cur_score = np.array(scores[j])
+            cur_pas = np.array(pas[j])
+            print(cur_score)
+            print(cur_pas)
+            idx = np.argsort(cur_score if metric_type == 1 else -cur_score)
+            ids[j] = cur_idx[idx]
+            scores[j] = cur_score[idx]
+            pas[j] = cur_pas[idx]
+            print(pas[j])
+            ids[j] = ids[j][: k * k_factor]
+            scores[j] = scores[j][: k * k_factor]
+            pas[j] = pas[j][: k * k_factor]
         nq = query.shape[0]
-        assert nq == len(result["ids"]) and nq == len(result["scores"])
 
         # build rerank requests input
-        base_id_batches = [[] for _ in range(self.cfg.n)]
-        base_dist_batches = [[] for _ in range(self.cfg.n)]
-        k_base_count_batches = [[0 for _ in range(nq)] for _ in range(self.cfg.n)]
+        base_id_batches = [[] for _ in range(self.cfg.refine_worker_count)]
+        base_dist_batches = [[] for _ in range(self.cfg.refine_worker_count)]
+        k_base_count_batches = [
+            [0 for _ in range(nq)] for _ in range(self.cfg.refine_worker_count)
+        ]
+
+        print(f"ids: {ids}")
+        print(f"scores: {scores}")
+        print(f"pas: {pas}")
 
         for i in range(nq):
-            for j in range(len(result["ids"][i])):
-                server_idx = self.cfg.get_server_id(result["pas"][i][j])
-                base_id_batches[server_idx].append(result["ids"][i][j])
-                base_dist_batches[server_idx].append(result["scores"][i][j])
+            for j in range(len(ids[i])):
+                server_idx = self.cfg.get_refine_worker_id(pas[i][j])
+                base_id_batches[server_idx].append(ids[i][j])
+                base_dist_batches[server_idx].append(scores[i][j])
                 k_base_count_batches[server_idx][i] += 1
 
         futures = [
             self.pool.submit(
-                self.clients[i].rerank,
+                self.refine_workers[i].rerank,
                 query,
                 k,
                 k_base_count_batches[i],
@@ -612,13 +821,13 @@ class ClientV3PA(ClientV3):
                 base_dist_batches[i],
                 metric_type,
             )
-            for i in range(self.cfg.n)
+            for i in range(self.cfg.refine_worker_count)
         ]
         results = [future.result() for future in futures]
 
         collated_id_ll = [[] for _ in range(nq)]
         collated_dist_ll = [[] for _ in range(nq)]
-        for i in range(self.cfg.n):
+        for i in range(self.cfg.refine_worker_count):
             if results[i] is None:
                 continue
             for j in range(nq):
@@ -635,3 +844,44 @@ class ClientV3PA(ClientV3):
                 {"ids": collated_id_ll[j][:k], "scores": collated_dist_ll[j][:k]}
             )
         return final_result
+
+    def delete(self, n, ids):
+        # broadcast to refineworker with the threadpool
+        refine_worker_futures = [
+            (
+                self.pool.submit(
+                    self.refine_workers[i].delete,
+                    n,
+                    ids,
+                )
+            )
+            for i in range(self.cfg.refine_worker_count)
+        ]
+
+        id_batches = [[] for _ in range(self.cfg.index_worker_group_count)]
+        for i in range(n):
+            index_worker_group_idx = self.cfg.get_index_worker_group_id(ids[i])
+            id_batches[index_worker_group_idx].append(ids[i])
+        index_worker_futures = [
+            (
+                self.pool.submit(
+                    client.delete,
+                    len(id_batches[i]),
+                    id_batches[i],
+                )
+                if len(id_batches[i]) != 0
+                else None
+            )
+            for i in range(self.cfg.index_worker_group_count)
+            for client in self.index_worker_groups[i]
+        ]
+        # wait for all requests to finish and collect results
+        results = [f.result() for f in refine_worker_futures]
+        for res in results:
+            if res is None:
+                return None
+        results = [f.result() for f in index_worker_futures]
+        for res in results:
+            if res is None:
+                return None
+        return results

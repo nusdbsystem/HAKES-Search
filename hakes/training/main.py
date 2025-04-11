@@ -88,10 +88,18 @@ def parse_args():
         required=True,
     )
     parser.add_argument(
+        "--metric", choices=["ip", "l2"], help="Distance metric", default="ip"
+    )
+    parser.add_argument(
         "--save_path_prefix",
         type=str,
         help="Path to save the index trained per epoch",
         required=True,
+    )
+    parser.add_argument(
+        "--use_query_recenter",
+        action="store_true",
+        help="Use only query vectors recentering",
     )
     args = parser.parse_args()
     return args
@@ -112,7 +120,9 @@ def run(
     pq_lr,
     lamb,
     device,
+    metric,
     save_path_prefix,
+    use_query_recenter=False,
 ):
     data = load_data_bin(f"{data_path}/train.bin", N, d)
     sampled_data = load_data_bin(f"{index_path}/sampleQuery_100000.bin", train_n, d)
@@ -128,7 +138,7 @@ def run(
     )
 
     # load the index
-    hakes_index = HakesIndex.load(f"{index_path}/base_index", "ip")
+    hakes_index = HakesIndex.load(f"{index_path}/base_index", metric)
     fixed_assignment = True
     shared_vts = True
     hakes_index.set_fixed_assignment(fixed_assignment)  # fix the assignment
@@ -142,7 +152,7 @@ def run(
     )
 
     # load reference index
-    reference_index = HakesIndex.load(f"{index_path}/base_index", "ip")
+    reference_index = HakesIndex.load(f"{index_path}/base_index", metric)
     reference_index.set_fixed_assignment(fixed_assignment)  # fix the assignment
     reference_index.set_share_vts(shared_vts)
 
@@ -194,7 +204,11 @@ def run(
         recenter_sample_rate = 0.1
         recenter_sample_count = int(N * recenter_sample_rate)
         recenter_indices = np.random.choice(N, recenter_sample_count, replace=False)
-        recenter_data = data[recenter_indices]
+        recenter_data = None
+        if use_query_recenter:
+            recenter_data = sampled_data
+        else:
+            recenter_data = data[recenter_indices]
 
         grouped_vectors = [[] for _ in range(hakes_index.ivf.nlist)]
         calc_assign_batch_size = 1024 * 10
@@ -217,8 +231,9 @@ def run(
             vecs_tensor = torch.tensor(vecs)
             vt_vecs = hakes_index.vts(vecs_tensor)
             rep = torch.mean(vt_vecs, dim=0)
-            normalized_rep = rep / torch.norm(rep)
-            new_centroids.append(normalized_rep.detach().cpu().numpy())
+            if metric == "ip":
+                rep = rep / torch.norm(rep)
+            new_centroids.append(rep.detach().cpu().numpy())
 
         reference_index.ivf.update_centers(np.array(new_centroids))
         update_centroids_finish = time.time()
@@ -263,5 +278,7 @@ if __name__ == "__main__":
         args.pq_lr,
         args.lamb,
         args.device,
+        args.metric,
         args.save_path_prefix,
+        args.use_query_recenter,
     )

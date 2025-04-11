@@ -53,30 +53,17 @@ class HakesIndex(nn.Module):
         if not os.path.exists(path):
             raise ValueError(f"Index file {path} does not exist")
         else:
-            logging.info(f"Loading from hakes index directory")
-            return HakesIndex.load_from_hakes_index_dir(path, metric=metric)
+            logging.info(f"Loading from hakes index file")
+            return HakesIndex.load_from_hakes_index(path, metric=metric)
 
     @classmethod
-    def load_from_hakes_index_dir(cls, path: str, metric="ip"):
-        vts = None
-        ivf = None
-        pq = None
-        ivf_vts = None
-        if not os.path.exists(path):
-            raise ValueError(f"Index directory {path} does not exist")
-        # iterate through all file name:
-        for f in os.listdir(path):
-            if f == "pre-transform.bin":
-                vts = HakesPreTransform.from_bin_file(os.path.join(path, f))
-            elif f == "ivf.bin":
-                ivf = HakesIVF.from_bin_file(os.path.join(path, f))
-            elif f == "pq.bin":
-                pq = HakesPQ.from_bin_file(os.path.join(path, f))
-            elif f == "ivf_pre-transform.bin":
-                ivf_vts = HakesPreTransform.from_bin_file(os.path.join(path, f))
-            else:
-                logging.info(f"Unknown file {f} skipped in index directory")
-        return cls(vts, ivf, pq, ivf_vts, metric)
+    def load_from_hakes_index(cls, path: str, metric="ip"):
+        with open(path, "rb") as f:
+            vts = HakesPreTransform.from_reader(f)
+            ivf = HakesIVF.from_reader(f)
+            pq = HakesPQ.from_reader(f)
+            assert ivf.metric == metric
+            return cls(vts, ivf, pq, metric=metric)
 
     def __str__(self):
         vts_str = f"VecTransform: {self.vts}\n" if self.vts is not None else ""
@@ -111,7 +98,14 @@ class HakesIndex(nn.Module):
             else:
                 raise ValueError(f"Unknown shape: {q.shape}, {cands.shape}")
         else:  # l2
-            return -torch.cdist(q, cands, p=2)
+            if len(q.shape) == 2 and len(cands.shape) == 2:
+                return torch.cdist(q, cands, p=2)
+            elif len(q.shape) == 3 and len(cands.shape) == 3:
+                return torch.cdist(q, cands, p=2).squeeze(1)
+            elif len(q.shape) == 2 and len(cands.shape) == 3:
+                return torch.cdist(q[:, None, :], cands, p=2).squeeze(1)
+            else:
+                raise ValueError(f"Unknown shape: {q.shape}, {cands.shape}")
 
     def kldiv_loss(self, target: torch.Tensor, score: torch.Tensor):
         if target is None or score is None:
@@ -238,34 +232,11 @@ class HakesIndex(nn.Module):
         else:
             raise ValueError(f"Unknown mode: {mode}")
 
-    def save(self, save_dir: str):
-        if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
-
-        if self.vts is not None:
-            self.vts.save(save_dir)
-
-        if self.ivf_vts is not None:
-            self.ivf_vts.save(save_dir, ivf_vt=True)
-
-        if self.ivf is not None:
-            self.ivf.save(save_dir)
-
-        if self.pq is not None:
-            self.pq.save(save_dir)
-
-    def save_as_hakes_index(self, save_dir: str):
-        if not os.path.exists(save_dir):
-            os.makedirs(save_dir)
-
-        if self.vts is not None:
-            self.vts.save_as_bin(save_dir, "pre-transform.bin")
-
-        if self.ivf_vts is not None:
-            self.ivf_vts.save_as_bin(save_dir, "ivf_pre-transform.bin")
-
-        if self.ivf is not None:
-            self.ivf.save_as_bin(save_dir, "ivf.bin")
-
-        if self.pq is not None:
-            self.pq.save_as_bin(save_dir, "pq.bin")
+    def save_as_hakes_index(self, path: str):
+        with open(path, "wb") as f:
+            if self.vts is not None:
+                self.vts.save_to_writer(f)
+            if self.ivf is not None:
+                self.ivf.save_to_writer(f)
+            if self.pq is not None:
+                self.pq.save_to_writer(f)

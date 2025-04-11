@@ -28,6 +28,13 @@ struct ExtendedAddRequest : public AddRequest {
   int64_t* assign = nullptr;
   std::unique_ptr<int64_t[]> assign_holder;
   int index_version = -1;
+
+  std::string to_string() const {
+    return "ExtendedAddRequest: n: " + std::to_string(n) +
+           ", d: " + std::to_string(d) +
+           ", add_to_refine_only: " + std::to_string(add_to_refine_only) +
+           ", assigned: " + std::to_string(assigned);
+  }
 };
 
 void encode_extended_add_request(const ExtendedAddRequest& request,

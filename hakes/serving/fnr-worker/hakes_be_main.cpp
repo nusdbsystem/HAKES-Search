@@ -32,8 +32,8 @@
 int main(int argc, char* argv[]) {
   // pick service selection
 
-  if (argc < 4) {
-    fprintf(stderr, "Usage: port data_path pa_mode\n");
+  if (argc < 5) {
+    fprintf(stderr, "Usage: port data_path mode pa_mode\n");
     exit(1);
   }
   // parse the port
@@ -43,11 +43,8 @@ int main(int argc, char* argv[]) {
     exit(1);
   }
   std::string path = argv[2];
-  bool pa_mode = std::stoi(argv[3]);
-  std::string trained_path = "";
-  if (argc > 4) {
-    trained_path = argv[4];
-  }
+  int mode = std::stoi(argv[3]);
+  bool pa_mode = std::stoi(argv[4]);
 
   hakes::FnREngine* engine = new hakes::HakesBatchFnREngine();
   if (argc == 6) {
@@ -56,13 +53,9 @@ int main(int argc, char* argv[]) {
       fprintf(stderr, "Invalid capacity %ld\n", cap);
       exit(1);
     }
-    engine->Initialize(path, pa_mode, cap);
+    engine->Initialize(path, mode, pa_mode, cap);
   } else {
-    engine->Initialize(path, pa_mode);
-  }
-
-  if (!trained_path.empty()) {
-    engine->UpdateIndexLocal(trained_path);
+    engine->Initialize(path, mode, pa_mode);
   }
 
   hakes::Service s{std::unique_ptr<hakes::ServiceWorker>(
@@ -80,4 +73,4 @@ int main(int argc, char* argv[]) {
   return 0;
 }
 
-// ./sample-server 2351 path 0
+// ./sample-server 2351 path 0 0

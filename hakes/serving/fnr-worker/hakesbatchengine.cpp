@@ -24,7 +24,7 @@
 
 namespace hakes {
 
-bool HakesBatchFnREngine::Initialize(const std::string& index_path,
+bool HakesBatchFnREngine::Initialize(const std::string& index_path, int mode,
                                      bool pa_mode, uint64_t cap) {
   auto checkpoint = get_latest_checkpoint_path(index_path);
   if (checkpoint.empty()) {
@@ -32,7 +32,7 @@ bool HakesBatchFnREngine::Initialize(const std::string& index_path,
   }
 
   bool success =
-      executor_->Initialize(index_path + "/" + checkpoint, pa_mode, cap);
+      executor_->Initialize(index_path + "/" + checkpoint, mode, pa_mode, cap);
   if (!success) {
     return false;
   }
@@ -138,6 +138,28 @@ bool HakesBatchFnREngine::Rerank(const std::string& request,
       end_time - start_time);
   // return 200 with the response
   return success;
+}
+
+bool HakesBatchFnREngine::Delete(const std::string& request,
+                                 std::string* response) {
+  assert(response);
+  DeleteResponse delete_response;
+
+  // decode the request
+  DeleteRequest delete_request;
+  bool success = decode_delete_request(request, &delete_request);
+  if (!success) {
+    delete_response.status = false;
+    delete_response.msg = "decode delete request error";
+    encode_delete_response(delete_response, response);
+    return false;
+  }
+
+  success = executor_->Delete(delete_request, &delete_response);
+
+  encode_delete_response(delete_response, response);
+
+  return true;
 }
 
 bool HakesBatchFnREngine::Checkpoint() {

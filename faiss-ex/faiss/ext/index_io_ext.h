@@ -27,83 +27,27 @@ namespace faiss {
 
 struct Index;
 
-const char ServingBaseIndexName[] = "base_index";
-const char ServingPAMappingName[] = "pa_mapping";
-const char ServingRefineIndexName[] = "refine_index";
-const char ServingMappingName[] = "id_maps";
-const char ServingServingConfigName[] = "serving_config";
-const char HakesVTName[] = "pre-transform.bin";
-const char HakesIVFName[] = "ivf.bin";
-const char HakesPQName[] = "pq.bin";
-const char HakesIVFVTName[] = "ivf_pre-transform.bin";
+bool load_hakes_params(IOReader* f, HakesIndex* idx);
+void save_hakes_params(IOWriter* f, const HakesIndex* idx);
 
-struct StringIOReader : IOReader {
-  StringIOReader(const std::string& data) : data(data) {}
-  std::string data;
-  size_t rp = 0;
-  size_t operator()(void* ptr, size_t size, size_t nitems) override;
-};
+bool load_hakes_findex(IOReader* ff, HakesIndex* idx);
+bool load_hakes_rindex(IOReader* rf, HakesIndex* idx);
+bool load_hakes_index(IOReader* ff, IOReader* rf, HakesIndex* idx, int mode);
 
-struct StringIOWriter : IOWriter {
-  std::string data;
-  size_t operator()(const void* ptr, size_t size, size_t nitems) override;
-};
+void save_hakes_findex(IOWriter* ff, const HakesIndex* idx);
 
-// the io utilities are not thread safe, needs external synchronization
+void save_hakes_rindex(IOWriter* rf, const HakesIndex* idx);
 
-void write_index_ext(const Index* idx, const char* fname);
-void write_index_ext(const Index* idx, IOWriter* f);
+void save_hakes_uindex(IOWriter* uf, const HakesIndex* idx);
 
-bool write_hakes_index(const char* fname, const Index* idx,
-                       const std::vector<VectorTransform*>* vts = nullptr,
-                       const std::vector<VectorTransform*>* ivf_vts = nullptr);
+void save_hakes_index(IOWriter* ff, IOWriter* rf, const HakesIndex* idx);
 
-Index* read_index_ext(const char* fname, int io_flags = 0);
-Index* read_index_ext(IOReader* f, int io_flags = 0);
+// for now handled separatelyy
+bool load_pa_map(IOReader* f, HakesIndex* idx);
+void save_pa_map(IOWriter* f, const HakesIndex* idx);
 
-Index* load_hakes_index(const char* fname, MetricType metric,
-                        std::vector<VectorTransform*>* vts);
-Index* load_hakes_index2(const char* fname, MetricType metric,
-                         std::vector<VectorTransform*>* vts);
-
-std::vector<idx_t> read_serving_config(const char* fname);
-std::unordered_map<faiss::idx_t, faiss::idx_t> read_pa_mapping(const char* fname);
-bool write_serving_config(const char* fname, const std::vector<idx_t>& config);
-bool write_serving_index(
-    const char* fname, const Index* base_idx,
-    const std::vector<idx_t>& refine_scope, const Index* refine_idx,
-    const IDMap& idmap, const std::vector<VectorTransform*>* vts = nullptr,
-    const std::vector<VectorTransform*>* ivf_vts = nullptr,
-    const std::unordered_map<faiss::idx_t, faiss::idx_t>& pa_mapping={});
-
-bool write_hakes_vt_quantizers(const char* fname,
-                               const std::vector<VectorTransform*>& pq_vts,
-                               const std::vector<VectorTransform*>& ivf_vts,
-                               const IndexFlat* ivf_centroids,
-                               const ProductQuantizer* pq);
-
-Index* load_hakes_vt_quantizers(const char* fname, MetricType metric,
-                                std::vector<VectorTransform*>* pq_vts,
-                                std::vector<VectorTransform*>* ivf_vts);
-// single file read write out
-bool write_hakes_vt_quantizers(IOWriter* f,
-                               const std::vector<VectorTransform*>& pq_vts,
-                               const IndexFlat* ivf_centroids,
-                               const ProductQuantizer* pq) ;
-Index* load_hakes_vt_quantizers(IOReader* f, MetricType metric,
-                                std::vector<VectorTransform*>* pq_vts);
-
-// parameters only
-bool write_hakes_index_params(IOWriter* f,
-                              const std::vector<VectorTransform*>& pq_vts,
-                              const std::vector<VectorTransform*>& ivf_vts,
-                              const IndexFlatL* ivf_centroids,
-                              const ProductQuantizer* pq);
-
-HakesIndex* load_hakes_index_params(IOReader* f);
-
-bool load_hakes_index_single_file(IOReader* f, HakesIndex* idx);
-bool write_hakes_index_single_file(IOWriter* f, const HakesIndex* idx);
+void save_init_params(IOWriter* f, const std::vector<VectorTransform*>* vts,
+                      ProductQuantizer* pq, IndexFlat* ivf);
 
 }  // namespace faiss
 

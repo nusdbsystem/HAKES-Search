@@ -37,6 +37,8 @@ bool FnRWorker::Handle(const std::string& url, const std::string& input,
     return engine_->Search(input, output);
   } else if (url == "/rerank") {
     return engine_->Rerank(input, output);
+  } else if (url == "/delete") {
+    return engine_->Delete(input, output);
   } else if (url == "/checkpoint") {
     return engine_->Checkpoint();
   } else if (url == "/get_index") {

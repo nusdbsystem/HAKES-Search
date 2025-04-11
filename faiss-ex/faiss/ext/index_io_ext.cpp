@@ -15,6 +15,7 @@
  */
 
 #include <faiss/IndexFlat.h>
+#include <faiss/IndexPreTransform.h>
 #include <faiss/IndexRefine.h>
 #include <faiss/ext/BlockInvertedListsL.h>
 #include <faiss/ext/IndexFlatL.h>
@@ -25,211 +26,16 @@
 #include <faiss/impl/CodePacker.h>
 #include <faiss/impl/FaissAssert.h>
 #include <faiss/impl/io_macros.h>
+#include <faiss/impl/pq4_fast_scan.h>
 #include <faiss/index_io.h>
 
 #include <filesystem>
 
 namespace faiss {
 
-size_t StringIOWriter::operator()(const void* ptr, size_t size, size_t nitems) {
-  size_t bytes = size * nitems;
-  if (bytes > 0) {
-    size_t o = data.size();
-    data.resize(o + bytes);
-    memcpy(&data[o], ptr, size * nitems);
-  }
-  return nitems;
-}
-
-size_t StringIOReader::operator()(void* ptr, size_t size, size_t nitems) {
-  if (rp >= data.size()) return 0;
-  size_t nremain = (data.size() - rp) / size;
-  if (nremain < nitems) nitems = nremain;
-  if (size * nitems > 0) {
-    memcpy(ptr, &data[rp], size * nitems);
-    rp += size * nitems;
-  }
-  return nitems;
-}
-
-namespace {
-
-void write_ivfl_header(const IndexIVFL* ivf, IOWriter* f) {
-  write_index_header(ivf, f);
-  WRITE1(ivf->nlist);
-  WRITE1(ivf->nprobe);
-  // subclasses write by_residual (some of them support only one setting of
-  // by_residual).
-  write_index_ext(ivf->quantizer, f);
-  // write_direct_map(&ivf->direct_map, f);
-}
-
-void read_ivfl_header(IndexIVFL* ivf, IOReader* f,
-                      std::vector<std::vector<idx_t>>* ids = nullptr) {
-  read_index_header(ivf, f);
-  READ1(ivf->nlist);
-  READ1(ivf->nprobe);
-  ivf->quantizer = read_index_ext(f);
-  ivf->own_fields = true;
-  if (ids) {  // used in legacy "Iv" formats
-    ids->resize(ivf->nlist);
-    for (size_t i = 0; i < ivf->nlist; i++) READVECTOR((*ids)[i]);
-  }
-}
-
-void write_refine_map(const std::unordered_map<idx_t, idx_t>& m, IOWriter* f) {
-  std::vector<std::pair<idx_t, idx_t>> v;
-  v.resize(m.size());
-  std::copy(m.begin(), m.end(), v.begin());
-  WRITEVECTOR(v);
-}
-
-void read_refine_map(std::unordered_map<idx_t, idx_t>* m, IOReader* f) {
-  std::vector<std::pair<idx_t, idx_t>> v;
-  READVECTOR(v);
-  m->clear();
-  m->reserve(v.size());
-  for (auto& p : v) {
-    (*m)[p.first] = p.second;
-  }
-}
-
-static void read_InvertedLists(IndexIVFL* ivf, IOReader* f, int io_flags) {
-  InvertedLists* ils = read_InvertedLists(f, io_flags);
-  if (ils) {
-    FAISS_THROW_IF_NOT(ils->nlist == ivf->nlist);
-    FAISS_THROW_IF_NOT(ils->code_size == InvertedLists::INVALID_CODE_SIZE ||
-                       ils->code_size == ivf->code_size);
-  }
-  ivf->invlists = ils;
-  ivf->own_invlists = true;
-}
-}  // anonymous namespace
-
-void write_index_ext(const Index* idx, const char* fname) {
-  FileIOWriter writer(fname);
-  write_index_ext(idx, &writer);
-}
-
-void write_index_ext(const Index* idx, IOWriter* f) {
-  register_bll_hook();  // register the BlockInvertedListsL hook.
-  // check the new types before falling back to the original implementation
-  if (const IndexFlatL* idxf = dynamic_cast<const IndexFlatL*>(idx)) {
-    // same impl as IndexFlat, but with different fourcc for load
-    uint32_t h = fourcc(idxf->metric_type == METRIC_INNER_PRODUCT ? "IlFI"
-                        : idxf->metric_type == METRIC_L2          ? "IlF2"
-                                                                  : "IlFl");
-    WRITE1(h);
-    write_index_header(idx, f);
-    WRITEXBVECTOR(idxf->codes);
-  } else if (const IndexRefineL* idxrf =
-                 dynamic_cast<const IndexRefineL*>(idx)) {
-    // Here we also need to store the mapping
-    uint32_t h = fourcc("IlRF");
-    WRITE1(h);
-    // additionally store the two mapping
-    write_refine_map(idxrf->off_to_idx, f);
-    write_refine_map(idxrf->idx_to_off, f);
-
-    write_index_header(idxrf, f);
-    write_index_ext(idxrf->base_index, f);
-    write_index_ext(idxrf->refine_index, f);
-    WRITE1(idxrf->k_factor);
-  } else if (const IndexIVFPQFastScanL* ivpq_2 =
-                 dynamic_cast<const IndexIVFPQFastScanL*>(idx)) {
-    // here we need to use the block inverted list locking IO
-    uint32_t h = fourcc("IlPf");
-    WRITE1(h);
-    write_ivfl_header(ivpq_2, f);
-    WRITE1(ivpq_2->by_residual);
-    WRITE1(ivpq_2->code_size);
-    WRITE1(ivpq_2->bbs);
-    WRITE1(ivpq_2->M2);
-    WRITE1(ivpq_2->implem);
-    WRITE1(ivpq_2->qbs2);
-    write_ProductQuantizer(&ivpq_2->pq, f);
-    write_InvertedLists(ivpq_2->invlists, f);
-  } else {
-    write_index(idx, f);
-  }
-}
-
-Index* read_index_ext(IOReader* f, int io_flags) {
-  register_bll_hook();  // register the BlockInvertedListsL hook.
-  Index* idx = nullptr;
-  uint32_t h;
-  READ1(h);
-  if (h == fourcc("IlFI") || h == fourcc("IlF2") || h == fourcc("IlFl")) {
-    IndexFlatL* idxf;
-    if (h == fourcc("IlFI")) {
-      idxf = new IndexFlatLIP();
-    } else if (h == fourcc("IlF2")) {
-      idxf = new IndexFlatLL2();
-    } else {
-      idxf = new IndexFlatL();
-    }
-    read_index_header(idxf, f);
-    idxf->code_size = idxf->d * sizeof(float);
-    READXBVECTOR(idxf->codes);
-    FAISS_THROW_IF_NOT(idxf->codes.size() == idxf->ntotal * idxf->code_size);
-    // leak!
-    idx = idxf;
-  } else if (h == fourcc("IlRF")) {
-    IndexRefineL* idxrf = new IndexRefineL();
-    read_refine_map(&idxrf->off_to_idx, f);
-    read_refine_map(&idxrf->idx_to_off, f);
-
-    read_index_header(idxrf, f);
-    idxrf->base_index = read_index_ext(f, io_flags);
-    // print memory after loading base index
-    printf("Memory after loading base index: %ld\n",
-           getCurrentRSS() / 1024 / 1024);
-    idxrf->refine_index = read_index_ext(f, io_flags);
-    READ1(idxrf->k_factor);
-    if (dynamic_cast<IndexFlatL*>(idxrf->refine_index)) {
-      // then make a RefineFlat with it
-      IndexRefineL* idxrf_old = idxrf;
-      idxrf = new IndexRefineFlatL();
-      *idxrf = *idxrf_old;
-      delete idxrf_old;
-    }
-    idxrf->own_fields = true;
-    idxrf->own_refine_index = true;
-    idx = idxrf;
-    printf("Memory after loading refine index: %ld\n",
-           getCurrentRSS() / 1024 / 1024);
-  } else if (h == fourcc("IlPf")) {
-    IndexIVFPQFastScanL* ivpq = new IndexIVFPQFastScanL();
-    read_ivfl_header(ivpq, f);
-    READ1(ivpq->by_residual);
-    READ1(ivpq->code_size);
-    READ1(ivpq->bbs);
-    READ1(ivpq->M2);
-    READ1(ivpq->implem);
-    READ1(ivpq->qbs2);
-    read_ProductQuantizer(&ivpq->pq, f);
-    read_InvertedLists(ivpq, f, io_flags);
-    ivpq->precompute_table();
-
-    const auto& pq = ivpq->pq;
-    ivpq->M = pq.M;
-    ivpq->nbits = pq.nbits;
-    ivpq->ksub = (1 << pq.nbits);
-    ivpq->code_size = pq.code_size;
-    printf("code_size: %ld\n", ivpq->code_size);
-    ivpq->init_code_packer();
-
-    idx = ivpq;
-  } else {
-    idx = read_index(f, io_flags);
-  }
-  return idx;
-}
-
-Index* read_index_ext(const char* fname, int io_flags) {
-  FileIOReader reader(fname);
-  return read_index_ext(&reader, io_flags);
-}
+/**
+ * streamlined functions for load and save hakes index
+ */
 
 bool read_hakes_pretransform(IOReader* f, std::vector<VectorTransform*>* vts) {
   // open pretransform file
@@ -253,198 +59,8 @@ bool read_hakes_pretransform(IOReader* f, std::vector<VectorTransform*>* vts) {
     lt->is_trained = true;
     vts->emplace_back(lt);
   }
+  printf("read_hakes_pretransform: num_vt: %d\n", num_vt);
   return true;
-}
-
-bool read_hakes_pretransform(const char* fname,
-                             std::vector<VectorTransform*>* vts) {
-  // open pretransform file
-  FileIOReader reader(fname);
-  return read_hakes_pretransform(&reader, vts);
-}
-
-IndexFlatL* read_hakes_ivf(IOReader* f, MetricType metric, bool* use_residual) {
-  // open ivf file
-  int32_t by_residual;
-  READ1(by_residual);
-  *use_residual = (by_residual == 1);
-  int32_t nlist, d;
-  READ1(nlist);
-  READ1(d);
-  IndexFlatL* ivf = new IndexFlatL(d, metric);
-  size_t code_size = nlist * d * sizeof(float);
-  std::vector<uint8_t> codes(code_size);
-  READANDCHECK(codes.data(), code_size);
-  printf("codes read size: %ld\n", code_size);
-  ivf->codes = std::move(codes);
-  ivf->is_trained = true;
-  ivf->ntotal = nlist;
-  return ivf;
-}
-
-IndexFlatL* read_hakes_ivf(const char* fname, MetricType metric,
-                           bool* use_residual) {
-  // open ivf file
-  FileIOReader reader(fname);
-  IOReader* f = &reader;
-  return read_hakes_ivf(f, metric, use_residual);
-}
-
-bool read_hakes_pq(IOReader* f, ProductQuantizer* pq) {
-  // open pq file
-  int32_t d, M, nbits;
-  READ1(d);
-  READ1(M);
-  READ1(nbits);
-  pq->d = d;
-  pq->M = M;
-  pq->nbits = nbits;
-  pq->set_derived_values();
-  pq->train_type = ProductQuantizer::Train_hot_start;
-  size_t centroids_size = pq->M * pq->ksub * pq->dsub;
-  READANDCHECK(pq->centroids.data(), centroids_size);
-  return true;
-}
-
-bool read_hakes_pq(const char* fname, ProductQuantizer* pq) {
-  // open pq file
-  FileIOReader reader(fname);
-  return read_hakes_pq(&reader, pq);
-}
-
-Index* load_hakes_index(const char* fname, MetricType metric,
-                        std::vector<VectorTransform*>* vts) {
-  assert(vts != nullptr);
-  // open pretransform file
-  std::string vt_fname = std::string(fname) + "/" + HakesVTName;
-  std::string ivf_fname = std::string(fname) + "/" + HakesIVFName;
-  std::string pq_fname = std::string(fname) + "/" + HakesPQName;
-
-  // load vts
-  read_hakes_pretransform(vt_fname.c_str(), vts);
-
-  // fast path if base_index exists
-  std::string base_name = std::string(fname) + "/base_index";
-  if (std::filesystem::exists(base_name)) {
-    return read_index_ext(base_name.c_str());
-  }
-
-  // load quantizer
-  bool use_residual;
-  IndexFlatL* quantizer =
-      read_hakes_ivf(ivf_fname.c_str(), metric, &use_residual);
-
-  // load pq
-  IndexIVFPQFastScanL* base_index = new IndexIVFPQFastScanL();
-  read_hakes_pq(pq_fname.c_str(), &base_index->pq);
-  // read_index_header
-  base_index->d = quantizer->d;
-  base_index->metric_type = metric;
-  // read_ivfl_header
-  base_index->nlist = quantizer->ntotal;
-  base_index->quantizer = quantizer;
-  base_index->own_fields = true;
-  // read_index_ext IVFPQFastScanL branch
-  base_index->by_residual = use_residual;
-  base_index->code_size = base_index->pq.code_size;
-  printf("code size: %ld\n", base_index->code_size);
-  base_index->bbs = 32;
-  base_index->M = base_index->pq.M;
-  base_index->M2 = (base_index->M + 1) / 2 * 2;
-  printf("M2: %ld\n", base_index->M2);
-  base_index->implem = 0;
-  base_index->qbs2 = 0;
-
-  // read_InvertedLists
-  CodePacker* code_packer = base_index->get_CodePacker();
-  BlockInvertedListsL* il = new BlockInvertedListsL(
-      base_index->nlist, code_packer->nvec, code_packer->block_size);
-  il->init(nullptr, std::vector<int>());
-  base_index->invlists = il;
-  base_index->own_invlists = true;
-
-  // base_index->precompute_table();
-  base_index->nbits = base_index->pq.nbits;
-  base_index->ksub = 1 << base_index->pq.nbits;
-  base_index->code_size = base_index->pq.code_size;
-  base_index->init_code_packer();
-
-  base_index->is_trained = true;
-  delete code_packer;
-  return base_index;
-}
-
-IndexFlat* read_hakes_ivf2(IOReader* f, MetricType metric, bool* use_residual) {
-  // open ivf file
-  int32_t by_residual;
-  READ1(by_residual);
-  *use_residual = (by_residual == 1);
-  int32_t nlist, d;
-  READ1(nlist);
-  READ1(d);
-  IndexFlat* ivf = new IndexFlat(d, metric);
-  size_t code_size = nlist * d * sizeof(float);
-  std::vector<uint8_t> codes(code_size);
-  READANDCHECK(codes.data(), code_size);
-  printf("codes read size: %ld\n", code_size);
-  ivf->codes = std::move(codes);
-  ivf->is_trained = true;
-  ivf->ntotal = nlist;
-  return ivf;
-}
-
-IndexFlat* read_hakes_ivf2(const char* fname, MetricType metric,
-                           bool* use_residual) {
-  // open ivf file
-  FileIOReader reader(fname);
-  return read_hakes_ivf2(&reader, metric, use_residual);
-}
-
-Index* load_hakes_index2(const char* fname, MetricType metric,
-                         std::vector<VectorTransform*>* vts) {
-  assert(vts != nullptr);
-  // open pretransform file
-  std::string vt_fname = std::string(fname) + "/" + HakesVTName;
-  std::string ivf_fname = std::string(fname) + "/" + HakesIVFName;
-  std::string pq_fname = std::string(fname) + "/" + HakesPQName;
-
-  // load vts
-  read_hakes_pretransform(vt_fname.c_str(), vts);
-
-  // load quantizer
-  bool use_residual;
-
-  IndexFlat* quantizer =
-      read_hakes_ivf2(ivf_fname.c_str(), metric, &use_residual);
-
-  // load pq
-  IndexIVFPQ* base_index = new IndexIVFPQ();
-  read_hakes_pq(pq_fname.c_str(), &base_index->pq);
-  // assemble
-  // IndexIVFL setting
-  auto code_size = base_index->pq.code_size;
-  base_index->code_size = code_size;
-  base_index->by_residual = use_residual;
-  // IndexIVFInterface no setting needed
-  // Index setting
-  base_index->d = quantizer->d;
-  base_index->metric_type = metric;
-  // quantizer setting
-  base_index->quantizer = quantizer;
-  base_index->nlist = quantizer->ntotal;
-  base_index->invlists =
-      new ArrayInvertedLists(base_index->nlist, base_index->code_size);
-  base_index->invlists->code_size = base_index->pq.code_size;
-  base_index->own_invlists = true;
-  base_index->own_fields = true;
-
-  base_index->precompute_table();
-  base_index->is_trained = true;
-
-  IndexRefineFlat* idxrf = new IndexRefineFlat(base_index);
-  idxrf->own_fields = true;
-
-  return idxrf;
 }
 
 bool write_hakes_pretransform(IOWriter* f,
@@ -454,7 +70,8 @@ bool write_hakes_pretransform(IOWriter* f,
   for (int i = 0; i < num_vt; i++) {
     LinearTransform* lt = dynamic_cast<LinearTransform*>((*vts)[i]);
     if (lt == nullptr) {
-      printf("write_hakes_pretransform: Only LinearTransform is supported\n");
+      // printf("write_hakes_pretransform: Only LinearTransform is
+      // supported\n");
       return false;
     }
     int32_t d_out = lt->d_out;
@@ -474,544 +91,360 @@ bool write_hakes_pretransform(IOWriter* f,
   return true;
 }
 
-bool write_hakes_pretransform(const char* fname,
-                              const std::vector<VectorTransform*>* vts) {
-  FileIOWriter writer(fname);
-  return write_hakes_pretransform(&writer, vts);
+void write_hakes_ivf(IOWriter* f, const HakesIndex* idx, bool q_ivf = false) {
+  int32_t d = idx->base_index_->d;
+  uint64_t ntotal = idx->base_index_->ntotal;
+  uint8_t metric_type = (idx->base_index_->metric_type == METRIC_L2) ? 0 : 1;
+  int32_t nlist = idx->base_index_->nlist;
+  WRITE1(d);
+  WRITE1(ntotal);
+  WRITE1(metric_type);
+  WRITE1(nlist);
+
+  size_t code_size =
+      idx->base_index_->nlist * idx->base_index_->d * sizeof(float);
+  if (q_ivf) {
+    WRITEANDCHECK(static_cast<IndexFlatL*>(idx->q_quantizer_)->codes.data(),
+                  code_size);
+  } else {
+    WRITEANDCHECK(
+        static_cast<IndexFlatL*>(idx->base_index_->quantizer)->codes.data(),
+        code_size);
+  }
+  printf("write_hakes_ivf: d: %d, ntotal: %ld, nlist: %ld\n",
+         idx->base_index_->d, idx->base_index_->ntotal,
+         idx->base_index_->nlist);
 }
 
-bool write_hakes_ivf(IOWriter* f, const Index* idx, bool use_residual) {
-  const IndexFlatL* quantizer = dynamic_cast<const IndexFlatL*>(idx);
-  if (quantizer == nullptr) {
-    printf("write_hakes_ivf: Only IndexFlatL is supported\n");
-    return false;
-  }
-  int32_t by_residual = use_residual ? 1 : 0;
-  WRITE1(by_residual);
-  int32_t nlist = quantizer->ntotal;
-  int32_t d = quantizer->d;
-  WRITE1(nlist);
-  WRITE1(d);
+bool read_hakes_ivf(IOReader* f, HakesIndex* idx) {
+  int32_t d;
+  uint64_t ntotal;
+  uint8_t metric_type;
+  int32_t nlist;
+  READ1(d);
+  READ1(ntotal);
+  READ1(metric_type);
+  READ1(nlist);
+  idx->base_index_->d = d;
+  idx->base_index_->ntotal = ntotal;
+  faiss::MetricType metric =
+      (metric_type == 0) ? faiss::METRIC_L2 : faiss::METRIC_INNER_PRODUCT;
+  idx->base_index_->metric_type = metric;
+  idx->base_index_->nlist = nlist;
+  printf("read_hakes_ivf: d: %d, ntotal: %ld, nlist: %d\n", d, ntotal, nlist);
+
+  IndexFlatL* quantizer = new IndexFlatL(d, metric);
   size_t code_size = nlist * d * sizeof(float);
-  WRITEANDCHECK(quantizer->codes.data(), code_size);
+  quantizer->codes.resize(code_size);
+  READANDCHECK(quantizer->codes.data(), code_size);
+  quantizer->is_trained = true;
+  quantizer->ntotal = nlist;
+  idx->base_index_->quantizer = quantizer;
   return true;
 }
 
-bool write_hakes_ivf(const char* fname, const Index* idx, bool use_residual) {
-  FileIOWriter writer(fname);
-  return write_hakes_ivf(&writer, idx, use_residual);
-}
-
-bool write_hakes_pq(IOWriter* f, const ProductQuantizer& pq) {
-  int32_t d = pq.d;
-  int32_t M = pq.M;
-  int32_t nbits = pq.nbits;
+void write_hakes_pq(IOWriter* f, const HakesIndex* idx, bool q_pq = false) {
+  ProductQuantizer* pq =
+      (q_pq) ? &idx->base_index_->q_pq : &idx->base_index_->pq;
+  int32_t d = pq->d;
+  int32_t M = pq->M;
+  int32_t nbits = pq->nbits;
   WRITE1(d);
   WRITE1(M);
   WRITE1(nbits);
-  size_t centroids_size = M * pq.ksub * pq.dsub;
-  WRITEANDCHECK(pq.centroids.data(), centroids_size);
+  size_t centroids_size = pq->M * pq->ksub * pq->dsub;
+  WRITEANDCHECK(pq->centroids.data(), centroids_size);
+}
+
+bool read_hakes_pq(IOReader* f, HakesIndex* idx) {
+  int32_t d, M, nbits;
+  READ1(d);
+  READ1(M);
+  READ1(nbits);
+  printf("read_hakes_pq: d: %d, M: %d, nbits: %d\n", d, M, nbits);
+  ProductQuantizer* pq = &idx->base_index_->pq;
+  pq->d = d;
+  pq->M = M;
+  pq->nbits = nbits;
+  pq->set_derived_values();
+  pq->train_type = ProductQuantizer::Train_hot_start;
+  size_t centroids_size = pq->M * pq->ksub * pq->dsub;
+  pq->centroids.resize(centroids_size);
+  printf("centroids_size: %ld\n", centroids_size);
+  READANDCHECK(pq->centroids.data(), centroids_size);
   return true;
 }
 
-bool write_hakes_pq(const char* fname, const ProductQuantizer& pq) {
-  FileIOWriter writer(fname);
-  return write_hakes_pq(&writer, pq);
+void write_hakes_compressed_vecs(IOWriter* f, const HakesIndex* idx) {
+  if (idx->base_index_->ntotal == 0) {
+    return;
+  }
+  // write the compressed vectors
+  const BlockInvertedListsL* il =
+      dynamic_cast<const BlockInvertedListsL*>(idx->base_index_->invlists);
+  for (size_t i = 0; i < il->nlist; i++) {
+    il->lists_[i].write(f);
+  }
 }
 
-bool write_hakes_index(const char* fname, const Index* idx,
-                       const std::vector<VectorTransform*>* vts,
-                       const std::vector<VectorTransform*>* ivf_vts) {
-  if (idx == nullptr) {
-    printf("write_hakes_index: index is nullptr\n");
-    return false;
-  }
+bool read_hakes_compressed_vecs(IOReader* f, HakesIndex* idx) {
+  int32_t nlist = idx->base_index_->nlist;
+  printf("read_hakes_compressed_vecs: nlist: %d\n", nlist);
 
-  // check and create directory
-  std::filesystem::create_directories(fname);
-  std::filesystem::permissions(fname,
-                               std::filesystem::perms::owner_all |
-                                   std::filesystem::perms::group_all |
-                                   std::filesystem::perms::others_all,
-                               std::filesystem::perm_options::add);
+  auto packer = CodePackerPQ4(idx->base_index_->pq.M, 32);
+  BlockInvertedListsL* il =
+      new BlockInvertedListsL(nlist, packer.nvec, packer.block_size);
 
-  // open pretransform file
-  std::string vt_fname = std::string(fname) + "/" + HakesVTName;
-  std::string ivf_fname = std::string(fname) + "/" + HakesIVFName;
-  std::string pq_fname = std::string(fname) + "/" + HakesPQName;
-  std::string ivf_vt_fname = std::string(fname) + "/" + HakesIVFVTName;
-
-  // write vts
-  if ((vts != nullptr) && (!write_hakes_pretransform(vt_fname.c_str(), vts))) {
-    printf("write_hakes_index: write pretransform failed\n");
-    return false;
-  }
-
-  // write ivf vts
-  if (ivf_vts != nullptr) {
-    if (!write_hakes_pretransform(ivf_vt_fname.c_str(), ivf_vts)) {
-      printf("write_hakes_index: write ivf pretransform failed\n");
-      return false;
+  if (idx->base_index_->ntotal != 0) {
+    for (size_t i = 0; i < nlist; i++) {
+      il->lists_[i].read(f);
     }
   }
 
-  // write ivf
-  const IndexIVFPQFastScanL* base_index =
-      dynamic_cast<const IndexIVFPQFastScanL*>(idx);
-  if (base_index == nullptr) {
-    printf("write_hakes_index: Only IndexIVFPQFastScanL is supported\n");
-    return false;
-  }
-  if (!write_hakes_ivf(ivf_fname.c_str(), base_index->quantizer,
-                       base_index->by_residual)) {
-    printf("write_hakes_index: write ivf failed\n");
-    return false;
-  }
-
-  // write pq
-  if (!write_hakes_pq(pq_fname.c_str(), base_index->pq)) {
-    printf("write_hakes_index: write pq failed\n");
-    return false;
-  }
-
-  // write the base index
-  std::string base_name = std::string(fname) + "/base_index";
-  write_index_ext(base_index, base_name.c_str());
-  printf("write index success to %s\n", fname);
+  il->init(nullptr);
+  idx->base_index_->invlists = il;
+  idx->base_index_->own_invlists = true;
   return true;
 }
 
-bool write_serving_config(const char* fname,
-                          const std::vector<idx_t>& refine_scope) {
-  FileIOWriter writer(fname);
-  IOWriter* f = &writer;
-  uint32_t h = fourcc("Conf");
-  WRITE1(h);
-  WRITEVECTOR(refine_scope);
-  return true;
-}
-
-std::vector<idx_t> read_serving_config(const char* fname) {
-  // open config file
-  FileIOReader reader(fname);
-  IOReader* f = &reader;
-  uint32_t h;
-  READ1(h);
-  if (h != fourcc("Conf")) {
-    printf("read_serving_config: wrong file format\n");
-    return std::vector<idx_t>{};
-  }
-  std::vector<idx_t> refine_scope;
-  READVECTOR(refine_scope);
-  return refine_scope;
-}
-
-std::unordered_map<faiss::idx_t, faiss::idx_t> read_pa_mapping(
-    const char* fname) {
-  // open pa mapping file
-  FileIOReader reader(fname);
-  IOReader* f = &reader;
-  std::vector<std::pair<idx_t, idx_t>> v;
-  READVECTOR(v);
-  std::unordered_map<faiss::idx_t, faiss::idx_t> pa_mapping;
-  pa_mapping.reserve(v.size());
-  for (auto& p : v) {
-    pa_mapping[p.first] = p.second;
-  }
-  return pa_mapping;
-}
-
-/**
- * @brief save the index to load in the serving framework
- *
- * @param fname dir to save index
- * @param base_idx base hakes index (vts, ivf centroids and pq codebook)
- * @param refine_scope the base index invlists index that the refine index
- * corresponds to
- * @param refine_idx refine index
- * @param idmap id mapping between refine index and base index
- * @param vts vector transformations
- * @return true
- * @return false
- */
-bool write_serving_index(
-    const char* fname, const Index* base_idx,
-    const std::vector<idx_t>& refine_scope, const Index* refine_idx,
-    const IDMap& idmap, const std::vector<VectorTransform*>* vts,
-    const std::vector<VectorTransform*>* ivf_vts,
-    const std::unordered_map<faiss::idx_t, faiss::idx_t>& pa_mapping) {
-  // check and create directory
-  std::filesystem::create_directories(fname);
-  std::filesystem::permissions(fname,
-                               std::filesystem::perms::owner_all |
-                                   std::filesystem::perms::group_all |
-                                   std::filesystem::perms::others_all,
-                               std::filesystem::perm_options::add);
-  std::string base_name = std::string(fname) + '/' + ServingBaseIndexName;
-  std::string pa_mapping_name = std::string(fname) + '/' + ServingPAMappingName;
-  std::string idmap_name = std::string(fname) + '/' + ServingMappingName;
-  std::string refine_name = std::string(fname) + '/' + ServingRefineIndexName;
-  std::string config_name = std::string(fname) + '/' + ServingServingConfigName;
-
-  // write base index
-  if (!write_hakes_index(base_name.c_str(), base_idx, vts)) {
-    printf("write_serving_index: write base index failed\n");
-    return false;
-  }
-
-  // write pa mapping
-  if (!pa_mapping.empty()) {
-    FileIOWriter writer(pa_mapping_name.c_str());
-    FileIOWriter* f = &writer;
-    std::vector<std::pair<idx_t, idx_t>> v;
-    v.resize(pa_mapping.size());
-    std::copy(pa_mapping.begin(), pa_mapping.end(), v.begin());
-    WRITEVECTOR(v);
-  }
-
-  // write idmap
-  if (!idmap.save(idmap_name.c_str())) {
-    printf("write_serving_index: write idmap failed\n");
-    return false;
-  }
-
-  // write refine index
-  if (refine_idx != nullptr) {
-    write_index_ext(refine_idx, refine_name.c_str());
-  } else {
-    printf("write_serving_index: refine index is nullptr, skipped\n");
-  }
-
-  // write config
-  if (!write_serving_config(config_name.c_str(), refine_scope)) {
-    printf("write_serving_index: write config failed\n");
-    return false;
-  }
-
-  return true;
-}
-
-bool write_hakes_ivf2(IOWriter* f, const IndexFlat* idx, bool use_residual) {
-  int32_t by_residual = use_residual ? 1 : 0;
-  WRITE1(by_residual);
-  int32_t nlist = idx->ntotal;
-  int32_t d = idx->d;
-  WRITE1(nlist);
+void write_hakes_full_vecs(IOWriter* f, const HakesIndex* idx) {
+  int32_t d = idx->refine_index_->d;
+  uint64_t ntotal = idx->refine_index_->ntotal;
+  uint8_t metric_type = (idx->refine_index_->metric_type == METRIC_L2) ? 0 : 1;
   WRITE1(d);
-  size_t code_size = nlist * d * sizeof(float);
-  WRITEANDCHECK(idx->codes.data(), code_size);
+  WRITE1(ntotal);
+  WRITE1(metric_type);
+  WRITEXBVECTOR(idx->refine_index_->codes);
+}
+
+bool read_hakes_full_vecs(IOReader* f, HakesIndex* idx) {
+  int32_t d;
+  uint64_t ntotal;
+  uint8_t metric_type;
+  READ1(d);
+  READ1(ntotal);
+  READ1(metric_type);
+  if (metric_type == 0) {
+    idx->refine_index_.reset(new faiss::IndexFlatLL2(d));
+  } else if (metric_type == 1) {
+    idx->refine_index_.reset(new faiss::IndexFlatLIP(d));
+  } else {
+    // printf("read_hakes_full_vecs: metric type not supported\n");
+    return false;
+  }
+  idx->refine_index_->ntotal = ntotal;
+  idx->refine_index_->is_trained = true;
+  idx->refine_index_->code_size = d * sizeof(float);
+  idx->refine_index_->codes.reserve(ntotal * idx->refine_index_->code_size * 2);
+  // need to modify the read vector to load in small batches, can change the
+  // impl in READXBVECTOR macro.
+  READXBVECTOR(idx->refine_index_->codes);
+  assert(idx->refine_index_->codes.size() ==
+         idx->refine_index_->ntotal * idx->refine_index_->code_size);
   return true;
 }
 
-bool write_hakes_ivf2(const char* fname, const IndexFlat* idx,
-                      bool use_residual) {
-  FileIOWriter writer(fname);
-  return write_hakes_ivf2(&writer, idx, use_residual);
+void save_hakes_findex(IOWriter* ff, const HakesIndex* idx) {
+  write_hakes_pretransform(ff, &idx->vts_);
+  printf("write_hakes_pretransform\n");
+  write_hakes_ivf(ff, idx);
+  printf("write_hakes_ivf\n");
+  write_hakes_pq(ff, idx);
+  printf("write_hakes_pq\n");
+  write_hakes_compressed_vecs(ff, idx);
+  printf("write_hakes_compressed_vecs\n");
 }
 
-bool write_hakes_vt_quantizers(const char* fname,
-                               const std::vector<VectorTransform*>& pq_vts,
-                               const std::vector<VectorTransform*>& ivf_vts,
-                               const IndexFlat* ivf_centroids,
-                               const ProductQuantizer* pq) {
-  if ((ivf_centroids == nullptr) || (pq == nullptr)) {
-    printf("write_hakes_vt_quantizers: ivf_centroids or pq is nullptr\n");
+void save_hakes_rindex(IOWriter* rf, const HakesIndex* idx) {
+  idx->mapping_->save(rf);
+  write_hakes_full_vecs(rf, idx);
+}
+
+void save_hakes_uindex(IOWriter* uf, const HakesIndex* idx) {
+  if (!idx->has_q_index_) {
+    return;
+  }
+  write_hakes_pretransform(uf, &idx->q_vts_);
+  printf("write_hakes_pretransform\n");
+  write_hakes_ivf(uf, idx, true);
+  printf("write_hakes_ivf\n");
+  write_hakes_pq(uf, idx, true);
+  printf("write_hakes_pq\n");
+}
+
+void save_hakes_index(IOWriter* ff, IOWriter* rf, const HakesIndex* idx) {
+  if (idx->base_index_) {
+    save_hakes_findex(ff, idx);
+  }
+  if (idx->refine_index_) {
+    save_hakes_rindex(rf, idx);
+  }
+}
+bool load_hakes_findex(IOReader* ff, HakesIndex* idx) {
+  if (!read_hakes_pretransform(ff, &idx->vts_)) {
     return false;
   }
-
-  // check and create directory
-  std::filesystem::create_directories(fname);
-  std::filesystem::permissions(fname,
-                               std::filesystem::perms::owner_all |
-                                   std::filesystem::perms::group_all |
-                                   std::filesystem::perms::others_all,
-                               std::filesystem::perm_options::add);
-
-  // open pretransform file
-  std::string pq_vt_fname = std::string(fname) + "/" + HakesVTName;
-  std::string ivf_vt_fname = std::string(fname) + "/" + HakesIVFVTName;
-  std::string ivf_fname = std::string(fname) + "/" + HakesIVFName;
-  std::string pq_fname = std::string(fname) + "/" + HakesPQName;
-
-  // write pq vts
-  if (!write_hakes_pretransform(pq_vt_fname.c_str(), &pq_vts)) {
-    printf("write_hakes_vt_quantizers: write pq vts failed\n");
+  idx->base_index_.reset(new faiss::IndexIVFPQFastScanL());
+  bool success = read_hakes_ivf(ff, idx) && read_hakes_pq(ff, idx) &&
+                 read_hakes_compressed_vecs(ff, idx);
+  if (!success) {
     return false;
   }
+  // default field settings
+  idx->base_index_->by_residual = false;
+  idx->base_index_->nprobe = 1;
+  idx->base_index_->own_fields = true;
+  idx->base_index_->is_trained = true;
+  assert(idx->base_index_->d == idx->vts_.back()->d_out);
+  idx->base_index_->bbs = 32;
+  idx->base_index_->M = idx->base_index_->pq.M;
+  idx->base_index_->M2 = (idx->base_index_->M + 1) / 2 * 2;
+  idx->base_index_->implem = 0;
+  idx->base_index_->qbs2 = 0;
+  idx->base_index_->nbits = idx->base_index_->pq.nbits;
+  idx->base_index_->ksub = 1 << idx->base_index_->pq.nbits;
+  idx->base_index_->code_size = idx->base_index_->pq.code_size;
+  idx->base_index_->init_code_packer();
+  idx->base_index_->precompute_table();
+  printf("code size: %ld\n", idx->base_index_->code_size);
+  printf("bbs: %d\n", idx->base_index_->bbs);
+  printf("M2: %ld\n", idx->base_index_->M2);
+  printf("implem: %d\n", idx->base_index_->implem);
+  printf("qbs2: %ld\n", idx->base_index_->qbs2);
+  printf("nbits: %ld\n", idx->base_index_->nbits);
+  printf("ksub: %ld\n", idx->base_index_->ksub);
+  printf("nlist: %ld\n", idx->base_index_->nlist);
+  printf("ntotal: %ld\n", idx->base_index_->ntotal);
+  printf("d: %d\n", idx->base_index_->d);
 
-  // write ivf vts
-  if (ivf_vts.empty()) {
-    printf(
-        "write_hakes_vt_quantizers: ivf_vts is empty so skip (assume ivf use "
-        "the same transform of opq)\n");
-  } else {
-    if (!write_hakes_pretransform(ivf_vt_fname.c_str(), &ivf_vts)) {
-      printf("write_hakes_vt_quantizers: write ivf vts failed\n");
+  return true;
+}
+
+bool load_hakes_rindex(IOReader* rf, HakesIndex* idx) {
+  idx->mapping_.reset(new faiss::IDMapImpl());
+  printf("load_hakes_rindex: load mapping\n");
+  idx->mapping_->load(rf);
+  printf("load_hakes_rindex: mapping size: %ld\n", idx->mapping_->size());
+  return read_hakes_full_vecs(rf, idx);
+}
+
+bool load_hakes_index(IOReader* ff, IOReader* rf, HakesIndex* idx, int mode) {
+  if (mode < 2) {
+    // filter index shall be loaded
+    printf("load_hakes_index: load filter index\n");
+    if (!load_hakes_findex(ff, idx)) {
       return false;
+    }
+    if (mode == 1) {
+      // only filter index is needed
+      return true;
     }
   }
 
-  // write ivf
-  if (!write_hakes_ivf2(ivf_fname.c_str(), ivf_centroids, false)) {
-    printf("write_hakes_vt_quantizers: write ivf failed\n");
-    return false;
-  }
-
-  // write pq
-  if (!write_hakes_pq(pq_fname.c_str(), *pq)) {
-    printf("write_hakes_vt_quantizers: write pq failed\n");
-    return false;
-  }
-
-  return true;
-}
-
-Index* load_hakes_vt_quantizers(const char* fname, MetricType metric,
-                                std::vector<VectorTransform*>* pq_vts,
-                                std::vector<VectorTransform*>* ivf_vts) {
-  assert(pq_vts != nullptr);
-  assert(ivf_vts != nullptr);
-  // open pretransform file
-  std::string pq_vt_fname = std::string(fname) + "/" + HakesVTName;
-  std::string ivf_vt_fname = std::string(fname) + "/" + HakesIVFVTName;
-  std::string ivf_fname = std::string(fname) + "/" + HakesIVFName;
-  std::string pq_fname = std::string(fname) + "/" + HakesPQName;
-
-  // load pq vts
-  read_hakes_pretransform(pq_vt_fname.c_str(), pq_vts);
-
-  // load ivf vts
-  // if no such file, skip
-  if (!std::filesystem::exists(ivf_vt_fname)) {
-    printf("load_hakes_vt_quantizers: ivf_vt_fname does not exist so skip\n");
+  if (rf) {
+    printf("load_hakes_index: load refine index\n");
+    return load_hakes_rindex(rf, idx);
   } else {
-    read_hakes_pretransform(ivf_vt_fname.c_str(), ivf_vts);
+    printf("load_hakes_index: no refine index\n");
+    idx->mapping_.reset(new faiss::IDMapImpl());
+    int refine_d =
+        (idx->vts_.empty()) ? idx->base_index_->d : idx->vts_.front()->d_in;
+    idx->refine_index_.reset(
+        new faiss::IndexFlatL(refine_d, idx->base_index_->metric_type));
+    return true;
   }
-
-  // fast path if base_index exists
-  std::string base_name = std::string(fname) + "/base_index";
-  if (std::filesystem::exists(base_name)) {
-    return read_index_ext(base_name.c_str());
-  }
-
-  // load ivf
-  bool use_residual;
-  IndexFlatL* quantizer =
-      read_hakes_ivf(ivf_fname.c_str(), metric, &use_residual);
-
-  // load pq
-  IndexIVFPQFastScanL* base_index = new IndexIVFPQFastScanL();
-  read_hakes_pq(pq_fname.c_str(), &base_index->pq);
-  // read_index_header
-  // use the opq vt to get the d
-  base_index->d = pq_vts->back()->d_out;
-  base_index->metric_type = metric;
-  // read_ivfl_header
-  base_index->nlist = quantizer->ntotal;
-  base_index->quantizer = quantizer;
-  base_index->own_fields = true;
-  // read_index_ext IVFPQFastScanL branch
-  base_index->by_residual = use_residual;
-  base_index->code_size = base_index->pq.code_size;
-  printf("code size: %ld\n", base_index->code_size);
-  base_index->bbs = 32;
-  base_index->M = base_index->pq.M;
-  base_index->M2 = (base_index->M + 1) / 2 * 2;
-  printf("M2: %ld\n", base_index->M2);
-  base_index->implem = 0;
-  base_index->qbs2 = 0;
-
-  // read_InvertedLists
-  CodePacker* code_packer = base_index->get_CodePacker();
-  BlockInvertedListsL* il = new BlockInvertedListsL(
-      base_index->nlist, code_packer->nvec, code_packer->block_size);
-  il->init(nullptr, std::vector<int>());
-  base_index->invlists = il;
-  base_index->own_invlists = true;
-  base_index->nbits = base_index->pq.nbits;
-  base_index->ksub = 1 << base_index->pq.nbits;
-  base_index->code_size = base_index->pq.code_size;
-  base_index->init_code_packer();
-
-  base_index->is_trained = true;
-
-  delete code_packer;
-  // return idxrf;
-  return base_index;
 }
 
-// |---#vts----|---vts---|---ivf---|---pq---|
-bool write_hakes_index_params(IOWriter* f,
-                              const std::vector<VectorTransform*>& vts,
-                              const std::vector<VectorTransform*>& ivf_vts,
-                              const IndexFlatL* ivf_centroids,
-                              const ProductQuantizer* pq) {
-  // write vts
-  if (!write_hakes_pretransform(f, &vts)) {
-    printf("write_hakes_index_params: write pq vts failed\n");
-    return false;
-  }
-
-  // write ivf vts
-  if (!write_hakes_pretransform(f, &ivf_vts)) {
-    printf("write_hakes_index_params: write ivf vts failed\n");
-    return false;
-  }
-
-  // write ivf
-  if (!write_hakes_ivf(f, ivf_centroids, false)) {
-    printf("write_hakes_index_params: write ivf failed\n");
-    return false;
-  }
-
-  // write pq
-  if (!write_hakes_pq(f, *pq)) {
-    printf("write_hakes_index_params: write pq failed\n");
-    return false;
-  }
-  return true;
-}
-
-// many fields of the returned index is not initialized. just the parameters
-HakesIndex* load_hakes_index_params(IOReader* f) {
-  HakesIndex* index = new HakesIndex();
-
-  // load pq vts
-  read_hakes_pretransform(f, &index->vts_);
-
-  // load ivf vts
-  read_hakes_pretransform(f, &index->ivf_vts_);
-
-  // load ivf
-  bool use_residual;
-  IndexFlatL* quantizer =
-      read_hakes_ivf(f, METRIC_INNER_PRODUCT, &use_residual);
-
-  // load pq
-
-  // assemble
-  IndexIVFPQFastScanL* base_index = new IndexIVFPQFastScanL();
-  read_hakes_pq(f, &base_index->pq);
-  base_index->d = index->vts_.back()->d_out;
-  base_index->metric_type = METRIC_INNER_PRODUCT;
-  base_index->nlist = quantizer->ntotal;
-  base_index->quantizer = quantizer;
-  base_index->own_fields = true;
-  base_index->by_residual = use_residual;
-  base_index->code_size = base_index->pq.code_size;
-  base_index->bbs = 32;
-  base_index->M = base_index->pq.M;
-  base_index->M2 = (base_index->M + 1) / 2 * 2;
-  base_index->implem = 0;
-  base_index->qbs2 = 0;
-
-  index->base_index_.reset(base_index);
-  index->cq_ = index->base_index_->quantizer;
-  return index;
-}
-
-// single file read write
-
-bool write_hakes_vt_quantizers(IOWriter* f,
-                               const std::vector<VectorTransform*>& pq_vts,
-                               const IndexFlat* ivf_centroids,
-                               const ProductQuantizer* pq) {
-  if ((ivf_centroids == nullptr) || (pq == nullptr)) {
-    printf("write_hakes_vt_quantizers: ivf_centroids or pq is nullptr\n");
-    return false;
-  }
-
-  // write pq vts
-  if (!write_hakes_pretransform(f, &pq_vts)) {
-    printf("write_hakes_vt_quantizers: write pq vts failed\n");
-    return false;
-  }
-
-  // write ivf
-  if (!write_hakes_ivf2(f, ivf_centroids, false)) {
-    printf("write_hakes_vt_quantizers: write ivf failed\n");
-    return false;
-  }
-
-  // write pq
-  if (!write_hakes_pq(f, *pq)) {
-    printf("write_hakes_vt_quantizers: write pq failed\n");
-    return false;
-  }
-
-  return true;
-}
-
-Index* load_hakes_vt_quantizers(IOReader* f, MetricType metric,
-                                std::vector<VectorTransform*>* pq_vts) {
-  assert(pq_vts != nullptr);
-  read_hakes_pretransform(f, pq_vts);
-
-  // load ivf
-  bool use_residual;
-  IndexFlatL* quantizer = read_hakes_ivf(f, metric, &use_residual);
-
-  // load pq
-  IndexIVFPQFastScanL* base_index = new IndexIVFPQFastScanL();
-  read_hakes_pq(f, &base_index->pq);
-  // read_index_header
-  // use the opq vt to get the d
-  base_index->d = pq_vts->back()->d_out;
-  base_index->metric_type = metric;
-  // read_ivfl_header
-  base_index->nlist = quantizer->ntotal;
-  base_index->quantizer = quantizer;
-  base_index->own_fields = true;
-  // read_index_ext IVFPQFastScanL branch
-  base_index->by_residual = use_residual;
-  base_index->code_size = base_index->pq.code_size;
-  printf("code size: %ld\n", base_index->code_size);
-  base_index->bbs = 32;
-  base_index->M = base_index->pq.M;
-  base_index->M2 = (base_index->M + 1) / 2 * 2;
-  printf("M2: %ld\n", base_index->M2);
-  base_index->implem = 0;
-  base_index->qbs2 = 0;
-
-  // read_InvertedLists
-  CodePacker* code_packer = base_index->get_CodePacker();
-  BlockInvertedListsL* il = new BlockInvertedListsL(
-      base_index->nlist, code_packer->nvec, code_packer->block_size);
-  il->init(nullptr, std::vector<int>());
-  base_index->invlists = il;
-  base_index->own_invlists = true;
-  base_index->nbits = base_index->pq.nbits;
-  base_index->ksub = 1 << base_index->pq.nbits;
-  base_index->code_size = base_index->pq.code_size;
-  base_index->init_code_packer();
-
-  base_index->is_trained = true;
-
-  delete code_packer;
-  return base_index;
-}
-
-bool load_hakes_index_single_file(IOReader* f, HakesIndex* idx) {
+bool load_hakes_params(IOReader* f, HakesIndex* idx) {
   if (!read_hakes_pretransform(f, &idx->vts_)) {
     return false;
   }
-  idx->base_index_.reset(
-      dynamic_cast<faiss::IndexIVFPQFastScanL*>(read_index_ext(f)));
-  idx->mapping_->load(f);
-  idx->refine_index_.reset(dynamic_cast<faiss::IndexFlatL*>(read_index_ext(f)));
+  idx->base_index_.reset(new faiss::IndexIVFPQFastScanL());
+  bool success = read_hakes_ivf(f, idx) && read_hakes_pq(f, idx);
+  if (!success) {
+    return false;
+  }
+  // default field settings
+  idx->base_index_->by_residual = false;
+  idx->base_index_->nprobe = 1;
+  idx->base_index_->own_fields = true;
+  idx->base_index_->is_trained = true;
+  assert(idx->base_index_->d == idx->vts_.back()->d_out);
+  idx->base_index_->bbs = 32;
+  idx->base_index_->M = idx->base_index_->pq.M;
+  idx->base_index_->M2 = (idx->base_index_->M + 1) / 2 * 2;
+  idx->base_index_->implem = 0;
+  idx->base_index_->qbs2 = 0;
+  idx->base_index_->nbits = idx->base_index_->pq.nbits;
+  idx->base_index_->ksub = 1 << idx->base_index_->pq.nbits;
+  idx->base_index_->code_size = idx->base_index_->pq.code_size;
+  idx->base_index_->precompute_table();
+
+  auto code_packer = idx->base_index_->get_CodePacker();
+  auto il = new BlockInvertedListsL(idx->base_index_->nlist, code_packer->nvec,
+                                    code_packer->block_size);
+  il->init(nullptr);
+  idx->base_index_->invlists = il;
+  idx->base_index_->own_invlists = true;
+  idx->base_index_->init_code_packer();
+  delete code_packer;
   return true;
 }
 
-bool write_hakes_index_single_file(IOWriter* f, const HakesIndex* idx) {
-  if (!write_hakes_pretransform(f, &idx->vts_)) {
-    return false;
+void save_hakes_params(IOWriter* f, const HakesIndex* idx) {
+  if (idx->base_index_ == nullptr) {
+    printf("save_hakes_params: filter index is not initialized\n");
+    return;
   }
-  write_index_ext(idx->base_index_.get(), f);
-  if (!idx->mapping_->save(f)) {
-    return false;
+  write_hakes_pretransform(f, &idx->vts_);
+  write_hakes_ivf(f, idx);
+  write_hakes_pq(f, idx);
+}
+
+bool load_pa_map(IOReader* f, HakesIndex* idx) {
+  std::vector<std::pair<idx_t, idx_t>> v;
+  READVECTOR(v);
+  idx->pa_mapping_.reserve(v.size());
+  for (auto& p : v) {
+    idx->pa_mapping_[p.first] = p.second;
   }
-  write_index_ext(idx->refine_index_.get(), f);
   return true;
+}
+
+void save_pa_map(IOWriter* f, const HakesIndex* idx) {
+  if (!idx->pa_mapping_.empty()) {
+    std::vector<std::pair<idx_t, idx_t>> v;
+    v.resize(idx->pa_mapping_.size());
+    std::copy(idx->pa_mapping_.begin(), idx->pa_mapping_.end(), v.begin());
+    WRITEVECTOR(v);
+  }
+}
+
+void save_init_params(IOWriter* f, const std::vector<VectorTransform*>* vts,
+                      ProductQuantizer* pq, IndexFlat* ivf) {
+  write_hakes_pretransform(f, vts);
+  // save ivf centroids
+  int32_t d = ivf->d;
+  uint64_t ntotal = 0;
+  uint8_t metric_type = (ivf->metric_type == METRIC_L2) ? 0 : 1;
+  int32_t nlist = ivf->ntotal;
+  WRITE1(d);
+  WRITE1(ntotal);
+  WRITE1(metric_type);
+  WRITE1(nlist);
+  size_t code_size = nlist * d * sizeof(float);
+  WRITEANDCHECK(ivf->codes.data(), code_size);
+  printf("write_hakes_ivf: d: %d, ntotal: %ld, nlist: %d\n", d, ntotal, nlist);
+
+  // save pq codebook
+  d = pq->d;
+  int32_t M = pq->M;
+  int32_t nbits = pq->nbits;
+  WRITE1(d);
+  WRITE1(M);
+  WRITE1(nbits);
+  size_t centroids_size = pq->M * pq->ksub * pq->dsub;
+  WRITEANDCHECK(pq->centroids.data(), centroids_size);
 }
 
 }  // namespace faiss

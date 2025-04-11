@@ -32,7 +32,8 @@ class HakesBatchFnREngine : public FnREngine {
   HakesBatchFnREngine() : executor_(new HakesExecutor()) {};
   ~HakesBatchFnREngine() {}
 
-  bool Initialize(const std::string& index_path, bool pa_mode = false, uint64_t cap = 0) override;
+  bool Initialize(const std::string& index_path, int mode, bool pa_mode = false,
+                  uint64_t cap = 0) override;
 
   bool IsInitialized() override;
 
@@ -41,6 +42,8 @@ class HakesBatchFnREngine : public FnREngine {
   bool Search(const std::string& request, std::string* response) override;
 
   bool Rerank(const std::string& request, std::string* response) override;
+
+  bool Delete(const std::string& request, std::string* response) override;
 
   bool Checkpoint() override;
 

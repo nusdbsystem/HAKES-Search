@@ -236,4 +236,68 @@ bool decode_search_response(const std::string& response_str,
   return true;
 }
 
+void encode_delete_request(const DeleteRequest& request, std::string* data) {
+  if (!data) {
+    throw std::invalid_argument("data is nullptr");
+  }
+  // prepare the request data
+  json::JSON json_request;
+  json_request["n"] = request.n;
+  json_request["ids"] = hex_encode(reinterpret_cast<const char*>(request.ids),
+                                   request.n * sizeof(int64_t));
+  data->append(json_request.dump());
+}
+
+bool decode_delete_request(const std::string& request_str,
+                           DeleteRequest* request) {
+  if (!request) {
+    throw std::invalid_argument("request is nullptr");
+  }
+  auto data = json::JSON::Load(request_str);
+  if (data.IsNull()) {
+    return false;
+  }
+  if (!data.hasKey("n") || !data.hasKey("ids")) {
+    return false;
+  }
+
+  request->n = data["n"].ToInt();
+  // decode ids
+  auto ids_hex = data["ids"].ToString();
+  auto ids_byte_str = hex_decode(ids_hex.c_str(), ids_hex.size());
+  request->ids_holder.reset(new int64_t[request->n]);
+  std::memcpy(request->ids_holder.get(), ids_byte_str.data(),
+              ids_byte_str.size());
+  request->ids = request->ids_holder.get();
+  return true;
+}
+
+void encode_delete_response(const DeleteResponse& response, std::string* data) {
+  if (!data) {
+    throw std::invalid_argument("data is nullptr");
+  }
+  json::JSON json_response;
+  json_response["status"] = response.status;
+  json_response["msg"] = response.msg;
+  data->append(json_response.dump());
+}
+
+bool decode_delete_response(const std::string& response_str,
+                            DeleteResponse* response) {
+  if (!response) {
+    throw std::invalid_argument("response is nullptr");
+  }
+  auto data = json::JSON::Load(response_str);
+  if (data.IsNull()) {
+    return false;
+  }
+
+  if (!data.hasKey("status") || !data.hasKey("msg")) {
+    return false;
+  }
+  response->status = data["status"].ToBool();
+  response->msg = data["msg"].ToString();
+  return true;
+}
+
 }  // namespace hakes

@@ -35,6 +35,7 @@
 #include <faiss/impl/platform_macros.h>
 #include <faiss/utils/AlignedTable.h>
 #include <faiss/utils/partitioning.h>
+#include <faiss/ext/TagChecker.h>
 
 /** This file contains callbacks for kernels that compute distances.
  */
@@ -72,6 +73,7 @@ struct SIMDResultHandlerToFloat : SIMDResultHandler {
     const uint16_t* dbias =
             nullptr; // table of biases to add to each query (for IVF L2 search)
     const float* normalizers = nullptr; // size 2 * nq, to convert
+    const TagChecker<idx_t>* id_filter = nullptr;
 
     SIMDResultHandlerToFloat(size_t nq, size_t ntotal)
             : nq(nq), ntotal(ntotal) {}
@@ -253,6 +255,7 @@ struct SingleResultHandler : ResultHandlerCompare<C, with_id_map> {
     using TI = typename C::TI;
     using RHC = ResultHandlerCompare<C, with_id_map>;
     using RHC::normalizers;
+    using RHC::id_filter;
 
     std::vector<int16_t> idis;
     float* dis;
@@ -282,14 +285,34 @@ struct SingleResultHandler : ResultHandlerCompare<C, with_id_map> {
         d0.store(d32tab);
         d1.store(d32tab + 16);
 
-        while (lt_mask) {
-            // find first non-zero
-            int j = __builtin_ctz(lt_mask);
-            lt_mask -= 1 << j;
-            T d = d32tab[j];
-            if (C::cmp(idis[q], d)) {
-                idis[q] = d;
-                ids[q] = this->adjust_id(b, j);
+        if (id_filter) {
+            id_filter->add_reader();
+            while (lt_mask) {
+                // find first non-zero
+                int j = __builtin_ctz(lt_mask);
+                lt_mask -= 1 << j;
+                auto idx = this->adjust_id(b, j);
+                if (id_filter->check(idx)) {
+                    continue;
+                }
+                T d = d32tab[j];
+                if (C::cmp(idis[q], d)) {
+                    idis[q] = d;
+                    ids[q] = idx;
+                }
+            }
+            id_filter->release_reader();
+        } else {
+            while (lt_mask) {
+                // find first non-zero
+                int j = __builtin_ctz(lt_mask);
+                lt_mask -= 1 << j;
+                auto idx = this->adjust_id(b, j);
+                T d = d32tab[j];
+                if (C::cmp(idis[q], d)) {
+                    idis[q] = d;
+                    ids[q] = idx;
+                }
             }
         }
     }
@@ -314,6 +337,7 @@ struct HeapHandler : ResultHandlerCompare<C, with_id_map> {
     using TI = typename C::TI;
     using RHC = ResultHandlerCompare<C, with_id_map>;
     using RHC::normalizers;
+    using RHC::id_filter;
 
     std::vector<uint16_t> idis;
     std::vector<TI> iids;
@@ -356,15 +380,34 @@ struct HeapHandler : ResultHandlerCompare<C, with_id_map> {
         d0.store(d32tab);
         d1.store(d32tab + 16);
 
-        while (lt_mask) {
-            // find first non-zero
-            int j = __builtin_ctz(lt_mask);
-            lt_mask -= 1 << j;
-            T dis = d32tab[j];
-            if (C::cmp(heap_dis[0], dis)) {
+        if (id_filter) {
+            id_filter->add_reader();
+            while (lt_mask) {
+                // find first non-zero
+                int j = __builtin_ctz(lt_mask);
+                lt_mask -= 1 << j;
                 int64_t idx = this->adjust_id(b, j);
-                heap_pop<C>(k, heap_dis, heap_ids);
-                heap_push<C>(k, heap_dis, heap_ids, dis, idx);
+                if (id_filter->check(idx)) {
+                    continue;
+                }
+                T dis = d32tab[j];
+                if (C::cmp(heap_dis[0], dis)) {
+                    heap_pop<C>(k, heap_dis, heap_ids);
+                    heap_push<C>(k, heap_dis, heap_ids, dis, idx);
+                }
+            }
+            id_filter->release_reader();
+        } else {
+            while (lt_mask) {
+                // find first non-zero
+                int j = __builtin_ctz(lt_mask);
+                lt_mask -= 1 << j;
+                int64_t idx = this->adjust_id(b, j);
+                T dis = d32tab[j];
+                if (C::cmp(heap_dis[0], dis)) {
+                    heap_pop<C>(k, heap_dis, heap_ids);
+                    heap_push<C>(k, heap_dis, heap_ids, dis, idx);
+                }
             }
         }
     }
@@ -402,6 +445,7 @@ struct ReservoirHandler : ResultHandlerCompare<C, with_id_map> {
     using TI = typename C::TI;
     using RHC = ResultHandlerCompare<C, with_id_map>;
     using RHC::normalizers;
+    using RHC::id_filter;
 
     size_t capacity; // rounded up to multiple of 16
 
@@ -449,12 +493,29 @@ struct ReservoirHandler : ResultHandlerCompare<C, with_id_map> {
         d0.store(d32tab);
         d1.store(d32tab + 16);
 
-        while (lt_mask) {
-            // find first non-zero
-            int j = __builtin_ctz(lt_mask);
-            lt_mask -= 1 << j;
-            T dis = d32tab[j];
-            res.add(dis, this->adjust_id(b, j));
+        if (id_filter) {
+            id_filter->add_reader();
+            while (lt_mask) {
+                // find first non-zero
+                int j = __builtin_ctz(lt_mask);
+                lt_mask -= 1 << j;
+                int64_t idx = this->adjust_id(b, j);
+                if (id_filter->check(idx)) {
+                    continue;
+                }
+                T dis = d32tab[j];
+                res.add(dis, idx);
+            }
+            id_filter->release_reader();
+        } else {
+            while (lt_mask) {
+                // find first non-zero
+                int j = __builtin_ctz(lt_mask);
+                lt_mask -= 1 << j;
+                int64_t idx = this->adjust_id(b, j);
+                T dis = d32tab[j];
+                res.add(dis, idx);
+            }
         }
     }
 

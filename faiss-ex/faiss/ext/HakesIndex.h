@@ -46,20 +46,18 @@ class HakesIndex {
     for (auto vt : vts_) {
       delete vt;
     }
-    for (auto vt : ivf_vts_) {
-      delete vt;
-    }
     for (auto vt : q_vts_) {
-      delete vt;
-    }
-    for (auto vt : q_ivf_vts_) {
       delete vt;
     }
     if (use_ivf_sq_) {
       delete cq_;
+      cq_ = nullptr;
     }
     if (q_cq_) {
       delete q_cq_;
+      delete q_quantizer_;
+      q_cq_ = nullptr;
+      q_quantizer_ = nullptr;
     }
   }
 
@@ -70,9 +68,9 @@ class HakesIndex {
   HakesIndex(HakesIndex&&) = delete;
   HakesIndex& operator=(HakesIndex&&) = delete;
 
-  bool Initialize(const std::string& path, bool keep_pa = false);
+  bool Initialize(const std::string& path, int mode = 0, bool keep_pa = false);
 
-  void UpdateIndex(HakesIndex& other);
+  void UpdateIndex(const HakesIndex* update_index);
 
   bool AddWithIds(int n, int d, const float* vecs, const faiss::idx_t* ids) {
     printf(
@@ -108,14 +106,9 @@ class HakesIndex {
               float* base_distances, std::unique_ptr<float[]>* distances,
               std::unique_ptr<faiss::idx_t[]>* labels);
 
-  inline bool has_ivf_vts() const { return ivf_vts_.size() > 0; }
-
   void Reserve(faiss::idx_t n);
 
   bool Checkpoint(const std::string& checkpoint_path);
-
-  // single file check out
-  bool Checkpoint(IOWriter* f);
 
   // external synchronization needed to not call this function concurrently with
   // UpdateParams
@@ -124,6 +117,15 @@ class HakesIndex {
   // external synchronization needed to not call this function concurrently with
   // other operations
   bool UpdateParams(const std::string& params);
+
+  inline void EnableDeletion() {
+    del_checker_.reset(new TagChecker<idx_t>());
+    printf("HakesIndex::EnableDeletion\n");
+  }
+
+  inline bool DeletionEnabled() const { return del_checker_ != nullptr; }
+
+  bool DeleteWithIds(int n, const idx_t* ids);
 
   std::string to_string() const;
 
@@ -139,15 +141,13 @@ class HakesIndex {
 
  public:
   std::string index_path_;
-  bool share_vt_;
   bool use_ivf_sq_ = false;
   std::vector<faiss::VectorTransform*> vts_;
-  std::vector<faiss::VectorTransform*> ivf_vts_;
   bool has_q_index_ = false;
   std::vector<faiss::VectorTransform*> q_vts_;
-  std::vector<faiss::VectorTransform*> q_ivf_vts_;
   faiss::Index* cq_;
   faiss::Index* q_cq_ = nullptr;
+  faiss::Index* q_quantizer_ = nullptr;
   std::unique_ptr<faiss::IndexIVFPQFastScanL> base_index_;
   std::shared_mutex mapping_mu_;
   std::unique_ptr<faiss::IDMap> mapping_;
@@ -159,6 +159,9 @@ class HakesIndex {
 
   bool keep_pa_;
   std::unordered_map<faiss::idx_t, faiss::idx_t> pa_mapping_;
+
+  // deletion checker
+  std::unique_ptr<TagChecker<idx_t>> del_checker_;
 };
 
 }  // namespace faiss

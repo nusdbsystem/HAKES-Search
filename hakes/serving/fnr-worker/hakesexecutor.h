@@ -30,7 +30,7 @@ class HakesExecutor {
   HakesExecutor() = default;
   ~HakesExecutor() {}
 
-  bool Initialize(const std::string& index_path, bool pa_mode = false,
+  bool Initialize(const std::string& index_path, int mode, bool pa_mode = false,
                   uint64_t cap = 0);
 
   bool IsInitialized();
@@ -40,6 +40,8 @@ class HakesExecutor {
   bool Search(const SearchRequest& request, SearchResponse* response);
 
   bool Rerank(const RerankRequest& request, SearchResponse* response);
+
+  bool Delete(const DeleteRequest& request, DeleteResponse* response);
 
   bool Checkpoint(const std::string& checkpoint_path);
 

@@ -130,7 +130,8 @@ def train_model(
             scheduler.step()
 
             optimizer.zero_grad()
-            model.ivf.normalize_centers()
+            if model.metric == "ip":
+                model.ivf.normalize_centers()
 
             global_step += 1
             # if global_step % logging_steps == 0:

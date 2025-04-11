@@ -403,6 +403,7 @@ void IndexIVFFastScanL::search_preassigned_new(
     idx_t n, const float* x, idx_t k, const idx_t* assign,
     const float* centroid_dis, float* distances, idx_t* labels,
     bool store_pairs, const IVFSearchParameters* params,
+    const TagChecker<idx_t>* del_checker,
     IndexIVFStats* /*stats*/) const {
   size_t nprobe = this->nprobe;
   if (params) {
@@ -418,7 +419,7 @@ void IndexIVFFastScanL::search_preassigned_new(
   FAISS_THROW_IF_NOT(k > 0);
 
   const CoarseQuantized cq = {nprobe, centroid_dis, assign};
-  search_dispatch_implem_new(n, x, k, distances, labels, cq, nullptr);
+  search_dispatch_implem_new(n, x, k, distances, labels, cq, nullptr, del_checker);
 }
 
 void IndexIVFFastScanL::range_search(idx_t n, const float* x, float radius,
@@ -654,7 +655,8 @@ void IndexIVFFastScanL::search_dispatch_implem(
 
 void IndexIVFFastScanL::search_dispatch_implem_new(
     idx_t n, const float* x, idx_t k, float* distances, idx_t* labels,
-    const CoarseQuantized& cq_in, const NormTableScaler* scaler) const {
+    const CoarseQuantized& cq_in, const NormTableScaler* scaler, 
+    const TagChecker<idx_t>* del_checker) const {
   bool is_max =
       !is_similarity_metric(metric_type);  // ip will leads to is_max = false;
   using RH = SIMDResultHandlerToFloat;
@@ -728,53 +730,57 @@ void IndexIVFFastScanL::search_dispatch_implem_new(
                 std::unique_ptr<RH> handler(make_knn_handler(is_max, impl, n, k, distances, labels));
                 search_implem_12_new(
                         n, x, k, *handler.get(),
-                        cq, &ndis, &nlist_visited, scaler);
-
-            } else if (impl == 14 || impl == 15) {
-
-                search_implem_14(
-                        n, x, k, distances, labels,
-                        cq, impl, scaler);
+                        cq, &ndis, &nlist_visited, scaler, del_checker);
             } else {
-                std::unique_ptr<RH> handler(make_knn_handler(is_max, impl, n, k, distances, labels));
-                search_implem_10(
-                        n, x, *handler.get(), cq,
-                        &ndis, &nlist_visited, scaler);
+              assert("only implem 12 and 13 are supported");
             }
+
+            // } else if (impl == 14 || impl == 15) {
+
+            //     search_implem_14(
+            //             n, x, k, distances, labels,
+            //             cq, impl, scaler);
+            // } else {
+            //     std::unique_ptr<RH> handler(make_knn_handler(is_max, impl, n, k, distances, labels));
+            //     search_implem_10(
+            //             n, x, *handler.get(), cq,
+            //             &ndis, &nlist_visited, scaler);
+            // }
       // clang-format on
     } else {
-      // explicitly slice over threads
-      int nslice = compute_search_nslice(this, n, cq.nprobe);
-      if (impl == 14 || impl == 15) {
-        // this might require slicing if there are too
-        // many queries (for now we keep this simple)
-        search_implem_14(n, x, k, distances, labels, cq, impl, scaler);
-      } else {
-#pragma omp parallel for reduction(+ : ndis, nlist_visited)
-        for (int slice = 0; slice < nslice; slice++) {
-          idx_t i0 = n * slice / nslice;
-          idx_t i1 = n * (slice + 1) / nslice;
-          float* dis_i = distances + i0 * k;
-          idx_t* lab_i = labels + i0 * k;
-          CoarseQuantizedSlice cq_i(cq, i0, i1);
-          if (!cq_i.done()) {
-            cq_i.quantize_slice(quantizer, x);
-          }
-          std::unique_ptr<RH> handler(
-              make_knn_handler(is_max, impl, i1 - i0, k, dis_i, lab_i));
-          // clang-format off
-                    if (impl == 12 || impl == 13) {
-                        search_implem_12_new(
-                                i1 - i0, x + i0 * d, k, *handler.get(),
-                                cq_i, &ndis, &nlist_visited, scaler);
-                    } else {
-                        search_implem_10(
-                                i1 - i0, x + i0 * d, *handler.get(),
-                                cq_i, &ndis, &nlist_visited, scaler);
-                    }
-          // clang-format on
-        }
-      }
+      assert("only implem 12 and 13 are supported");
+//       // explicitly slice over threads
+//       int nslice = compute_search_nslice(this, n, cq.nprobe);
+//       if (impl == 14 || impl == 15) {
+//         // this might require slicing if there are too
+//         // many queries (for now we keep this simple)
+//         search_implem_14(n, x, k, distances, labels, cq, impl, scaler);
+//       } else {
+// #pragma omp parallel for reduction(+ : ndis, nlist_visited)
+//         for (int slice = 0; slice < nslice; slice++) {
+//           idx_t i0 = n * slice / nslice;
+//           idx_t i1 = n * (slice + 1) / nslice;
+//           float* dis_i = distances + i0 * k;
+//           idx_t* lab_i = labels + i0 * k;
+//           CoarseQuantizedSlice cq_i(cq, i0, i1);
+//           if (!cq_i.done()) {
+//             cq_i.quantize_slice(quantizer, x);
+//           }
+//           std::unique_ptr<RH> handler(
+//               make_knn_handler(is_max, impl, i1 - i0, k, dis_i, lab_i));
+//           // clang-format off
+//                     if (impl == 12 || impl == 13) {
+//                         search_implem_12_new(
+//                                 i1 - i0, x + i0 * d, k, *handler.get(),
+//                                 cq_i, &ndis, &nlist_visited, scaler);
+//                     } else {
+//                         search_implem_10(
+//                                 i1 - i0, x + i0 * d, *handler.get(),
+//                                 cq_i, &ndis, &nlist_visited, scaler);
+//                     }
+//           // clang-format on
+//         }
+//       }
     }
 
   } else {
@@ -1185,7 +1191,7 @@ void IndexIVFFastScanL::search_implem_12(idx_t n, const float* x,
 void IndexIVFFastScanL::search_implem_12_new(
     idx_t n, const float* x, idx_t k, SIMDResultHandlerToFloat& handler,
     const CoarseQuantized& cq, size_t* ndis_out, size_t* nlist_out,
-    const NormTableScaler* scaler) const {
+    const NormTableScaler* scaler, const TagChecker<idx_t>* del_checker) const {
   if (n == 0) {  // does not work well with reservoir
     return;
   }
@@ -1201,6 +1207,7 @@ void IndexIVFFastScanL::search_implem_12_new(
 
   compute_LUT_uint8(n, x, cq, dis_tables, biases, normalizers.get());
   handler.begin(skip & 16 ? nullptr : normalizers.get());
+  handler.id_filter = del_checker;
 
   std::chrono::high_resolution_clock::time_point compute_lut_end =
       std::chrono::high_resolution_clock::now();

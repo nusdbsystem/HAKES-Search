@@ -1,4 +1,3 @@
-from .message import prepare_add_request, prepare_search_request, parse_search_response
-from .cliconf import ClientConfig
-from .client import Client, ClientV2
+from .cliconf import ClientConfig, ClientConfigPA
+from .client import HakesClient, HakesClientPA
 from .hakesindex import HakesIndexParams

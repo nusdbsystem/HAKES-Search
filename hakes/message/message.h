@@ -39,6 +39,11 @@ struct AddRequest {
   std::unique_ptr<float[]> vecs_holder;
   int64_t* ids;
   std::unique_ptr<int64_t[]> ids_holder;
+
+  std::string to_string() const {
+    return "SearchRequest: n: " + std::to_string(n) +
+           ", d: " + std::to_string(d);
+  }
 };
 
 void encode_add_request(const AddRequest& request, std::string* data);
@@ -106,6 +111,27 @@ void encode_search_response(const SearchResponse& response, std::string* data);
 
 bool decode_search_response(const std::string& response_str,
                             SearchResponse* response);
+
+struct DeleteRequest {
+  int n = 0;
+  int64_t* ids;
+  std::unique_ptr<int64_t[]> ids_holder;
+};
+
+void encode_delete_request(const DeleteRequest& request, std::string* data);
+
+bool decode_delete_request(const std::string& request_str,
+                           DeleteRequest* request);
+
+struct DeleteResponse {
+  bool status;
+  std::string msg;
+};
+
+void encode_delete_response(const DeleteResponse& response, std::string* data);
+
+bool decode_delete_response(const std::string& response_str,
+                            DeleteResponse* response);
 
 }  // namespace hakes
 

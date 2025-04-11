@@ -59,6 +59,7 @@ struct Config {
   int batch_size = 1;
   int nprobe = 100;
   int k_factor = 50;
+  int metric_type = 0;
 
   std::string index_path = "./index";
   std::string update_index = "";
@@ -97,11 +98,12 @@ Config parse_config(int argc, char** argv) {
   }
   cfg.nprobe = std::stoul(argv[14]);
   cfg.k_factor = std::stoul(argv[15]);
-  if (argc > 16) {
-    cfg.index_path = argv[16];
-  }
+  cfg.metric_type = std::stoul(argv[16]);
   if (argc > 17) {
-    cfg.update_index = argv[17];
+    cfg.index_path = argv[17];
+  }
+  if (argc > 18) {
+    cfg.update_index = argv[18];
   }
 
   // print summary
@@ -122,6 +124,7 @@ Config parse_config(int argc, char** argv) {
   std::cout << "BATCH_SIZE: " << cfg.batch_size << std::endl;
   std::cout << "NPROBE: " << cfg.nprobe << std::endl;
   std::cout << "K_FACTOR: " << cfg.k_factor << std::endl;
+  std::cout << "METRIC_TYPE: " << cfg.metric_type << std::endl;
   std::cout << "Index path: " << cfg.index_path << std::endl;
   if (!cfg.update_index.empty()) {
     std::cout << "Update index params: " << cfg.update_index << std::endl;
@@ -299,7 +302,8 @@ int main(int argc, char** argv) {
   int* gt = nullptr;
   gt = load_groundtruth(cfg.data_groundtruth_path.c_str(), gt_len, nq);
 
-  faiss::MetricType metric = faiss::METRIC_INNER_PRODUCT;
+  faiss::MetricType metric =
+      (cfg.metric_type == 1) ? faiss::METRIC_L2 : faiss::METRIC_INNER_PRODUCT;
 
   printf("Memory usage before initialization: %ld\n",
          faiss::getCurrentRSS() / 1024 / 1024);
@@ -318,8 +322,12 @@ int main(int argc, char** argv) {
     // load index
     index.reset(new faiss::HakesIndex());
     printf("Loading index from %s\n", cfg.index_path.c_str());
-    index->use_ivf_sq_ = true;
-    index->Initialize(cfg.index_path.c_str());
+    if (faiss::MetricType::METRIC_L2 == metric) {
+      index->use_ivf_sq_ = false;
+    } else {
+      index->use_ivf_sq_ = true;
+    }
+    index->Initialize(cfg.index_path.c_str(), 0);
 
     // use power-of-3 assignment
     index->base_index_->use_balanced_assign_ = false;
@@ -350,7 +358,7 @@ int main(int argc, char** argv) {
       faiss::HakesIndex update_index;
       printf("Loading update index from %s\n", cfg.update_index.c_str());
       update_index.Initialize(cfg.update_index.c_str());
-      index->UpdateIndex(update_index);
+      index->UpdateIndex(&update_index);
     }
   }
 
