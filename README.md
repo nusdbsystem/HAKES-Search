@@ -8,14 +8,9 @@ This code repository is a cleaned version prepared for VLDB2025 submission.
 
 The folder [./extended-version](./extended-version/) contains the extended version of the submission with additional discussion and experimental results.
 
-## Code update
+## Coming soon
 
-Training extended to support Euclidean distance.
-Update the index loading and saving.
-The serving for filter stage index and refine stage index is decoupled.
-The client support for decouple deployment and IndexWorkerGroup is added.
-The deletion support by tombstone is added (vector removal during checkpoint not yet migrated).
-Removal of unused codes.
+We will release the codes and instructions to prepare the experiment data and trained index parameters soon.
 
 ## Code structure
 
@@ -114,3 +109,9 @@ The hakes serving directory shall have the following structure. Where the built 
 ```
 
 Checkpoint requests trigger HAKES to create additional checkpoints under this directory. And when the server is restarted, it will load the latest checkpoint.
+
+## Reference
+
+Please cite our publication when you use HAKES in your research or development.
+
+* Guoyu Hu, Shaofeng Cai, Tien Tuan Anh Dinh, Zhongle Xie, Cong Yue, Gang Chen, and Beng Chin Ooi. HAKES: Scalable Vector Database for Embedding Search Service. PVLDB, 18(9): 3049 - 3062, 2025. doi:10.14778/3746405.3746427
