@@ -55,8 +55,8 @@ class HakesIndex {
     }
     if (q_cq_) {
       delete q_cq_;
-      delete q_quantizer_;
       q_cq_ = nullptr;
+      if (use_ivf_sq_) delete q_quantizer_;
       q_quantizer_ = nullptr;
     }
   }
@@ -88,8 +88,7 @@ class HakesIndex {
   bool AddBasePreassigned(int n, int d, const float* vecs,
                           const faiss::idx_t* ids, const faiss::idx_t* assign);
 
-  bool AddToRefine(int n, int d, const float* vecs, const faiss::idx_t* xids,
-                   const faiss::idx_t* assign);
+  bool AddRefine(int n, int d, const float* vecs, const faiss::idx_t* xids);
 
   bool Search(int n, int d, const float* query, const HakesSearchParams& params,
               std::unique_ptr<float[]>* distances,

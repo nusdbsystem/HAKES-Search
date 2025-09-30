@@ -42,8 +42,6 @@ class HakesDataset(Dataset):
         return (
             self.query[idx],
             self.train_data[self.pos_ids[idx]],
-            self.train_data[self.neg_ids[idx]],
-            self.pos_ids[idx],
         )
 
 
@@ -51,14 +49,9 @@ class HakesDataCollator:
     def __call__(self, batch):
         query_batch = np.array([x[0] for x in batch])
         pos_batch = np.array([x[1] for x in batch])
-        neg_batch = np.array([x[2] for x in batch])
-        pos_ids_batch = [x[3] for x in batch]
-        neg_ids_batch = [x[4] for x in batch]
         query_tensor = torch.FloatTensor(query_batch)
         pos_tensor = torch.FloatTensor(pos_batch)
         return {
             "query_data": query_tensor,
             "pos_data": pos_tensor,
-            "pos_ids": pos_ids_batch,
-            "neg_ids": neg_ids_batch,
         }

@@ -53,7 +53,7 @@ class HakesIndex(nn.Module):
         if not os.path.exists(path):
             raise ValueError(f"Index file {path} does not exist")
         else:
-            logging.info(f"Loading from hakes index file")
+            logging.info("Loading from hakes index file")
             return HakesIndex.load_from_hakes_index(path, metric=metric)
 
     @classmethod
