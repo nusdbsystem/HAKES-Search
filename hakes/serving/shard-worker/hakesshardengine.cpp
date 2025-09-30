@@ -16,6 +16,7 @@
 
 #include "shard-worker/hakesshardengine.h"
 
+#include <filesystem>
 #include <vector>
 
 #include "common/checkpoint.h"
@@ -227,6 +228,13 @@ bool HakesShardEngine::Checkpoint() {
       index_path_ + "/" +
       format_checkpoint_path(
           index_version_.fetch_add(1, std::memory_order_relaxed) + 1);
+  std::filesystem::create_directories(checkpoint_path);
+  std::filesystem::permissions(checkpoint_path,
+                               std::filesystem::perms::owner_all |
+                                   std::filesystem::perms::group_all |
+                                   std::filesystem::perms::others_all,
+                               std::filesystem::perm_options::add);
+
   std::shared_lock lock(mutex_);
   return index_->Checkpoint(checkpoint_path);
 }

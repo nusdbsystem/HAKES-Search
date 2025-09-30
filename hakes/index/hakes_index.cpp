@@ -73,7 +73,7 @@ Config parse_config(int argc, char** argv) {
               << "DATA_N DATA_NUM_QUERY DATA_DIM SEARCH_K DATA_GROUNDTRUTH_LEN "
                  "DATA_TRAIN_PATH DATA_QUERY_PATH DATA_GROUNDTRUTH_PATH "
                  "LOAD_INDEX TEST_SEARCH_ONLY NUM_CLIENT WRITE_RATIO "
-                 "BATCH_SIZE NPROBE K_FACTOR INDEX_PATH [UPDATE INDEX PARAMS]"
+                 "BATCH_SIZE NPROBE K_FACTOR METRIC_TYPE INDEX_PATH [UPDATE_INDEX_FILE]"
               << std::endl;
     exit(-1);
   }
@@ -354,10 +354,14 @@ int main(int argc, char** argv) {
     }
 
     // if update index exists use its parameters instead
-    if (!cfg.update_index.empty()) {
-      faiss::HakesIndex update_index;
+    // note that if the uindex.bin is already placed under the index_path,
+    // then parameters in the uindex.bin is already loaded.
+    if (!cfg.update_index.empty() && faiss::IsFileExist(cfg.update_index)) {
+      std::unique_ptr<faiss::FileIOReader> uf =
+          std::make_unique<faiss::FileIOReader>(cfg.update_index.c_str());
       printf("Loading update index from %s\n", cfg.update_index.c_str());
-      update_index.Initialize(cfg.update_index.c_str());
+      faiss::HakesIndex update_index;
+      auto success = load_hakes_params(uf.get(), &update_index);
       index->UpdateIndex(&update_index);
     }
   }

@@ -55,7 +55,7 @@ Config parse_config(int argc, char** argv) {
   Config cfg;
   if (argc < 9) {
     std::cout << "Usage: " << argv[0]
-              << "DATA_N DATA_DIM DATA_TRAIN_PATH OPQ_OUT M "
+              << " DATA_N DATA_DIM DATA_TRAIN_PATH OPQ_OUT M "
                  "NLIST METRIC INDEX_SAVE_PATH"
               << std::endl;
     exit(-1);

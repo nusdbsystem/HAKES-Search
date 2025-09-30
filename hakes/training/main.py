@@ -2,7 +2,7 @@ import argparse
 import copy
 import numpy as np
 import random
-import sys
+import os
 import time
 import torch
 import tqdm
@@ -138,7 +138,7 @@ def run(
     )
 
     # load the index
-    hakes_index = HakesIndex.load(f"{index_path}/base_index", metric)
+    hakes_index = HakesIndex.load(f"{index_path}/findex.bin", metric)
     fixed_assignment = True
     shared_vts = True
     hakes_index.set_fixed_assignment(fixed_assignment)  # fix the assignment
@@ -152,7 +152,7 @@ def run(
     )
 
     # load reference index
-    reference_index = HakesIndex.load(f"{index_path}/base_index", metric)
+    reference_index = HakesIndex.load(f"{index_path}/findex.bin", metric)
     reference_index.set_fixed_assignment(fixed_assignment)  # fix the assignment
     reference_index.set_share_vts(shared_vts)
 
@@ -240,7 +240,8 @@ def run(
 
         # save the index
         save_path = f"{save_path_prefix}/epoch-{e}"
-        reference_index.save_as_hakes_index(f"{save_path}/base_index")
+        os.makedirs(save_path, exist_ok=True)
+        reference_index.save_as_hakes_index(f"{save_path}/uindex.bin")
         with open(f"{save_path}/train.txt", "w") as f:
             f.write(f"index_path: {index_path}\n")
             f.write(f"epoch {e}\n")

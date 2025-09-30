@@ -135,7 +135,7 @@ void HakesIndex::UpdateIndex(const HakesIndex* update_index) {
     return;
   }
   assert(update_index->base_index_->metric_type == base_index_->metric_type);
-  assert(update_index->cq_->ntotal == update_index->cq_->ntotal);
+  assert(update_index->base_index_->quantizer->ntotal == update_index->base_index_->quantizer->ntotal);
   assert(update_index->vts_.back()->d_out == base_index_->d);
   assert(update_index->base_index_->by_residual == base_index_->by_residual);
   assert(update_index->base_index_->code_size == base_index_->code_size);
@@ -193,7 +193,7 @@ void HakesIndex::UpdateIndex(const HakesIndex* update_index) {
   q_quantizer_ = new_quantizer;
 
   if (use_ivf_sq_) {
-    assert(update_index->cq_);
+    assert(update_index->base_index_->quantizer);
     printf("apply sq to the update index ivf quantizer\n");
     auto tmp = new IndexScalarQuantizerL(
         update_index->base_index_->d,
@@ -211,6 +211,7 @@ void HakesIndex::UpdateIndex(const HakesIndex* update_index) {
     delete q_cq_;
     q_cq_ = tmp;
   } else {
+    delete q_cq_;
     q_cq_ = q_quantizer_;
   }
 
@@ -290,9 +291,8 @@ bool HakesIndex::AddWithIds(int n, int d, const float* vecs,
   return true;
 }
 
-bool HakesIndex::AddToRefine(int n, int d, const float* vecs,
-                             const faiss::idx_t* xids,
-                             const faiss::idx_t* assign) {
+bool HakesIndex::AddRefine(int n, int d, const float* vecs,
+                             const faiss::idx_t* xids) {
   assert(refine_index_);
   {
     std::unique_lock lock(mapping_mu_);
@@ -530,13 +530,6 @@ void HakesIndex::Reserve(faiss::idx_t n) {
 
 // same as EngineV2
 bool HakesIndex::Checkpoint(const std::string& checkpoint_path) {
-  std::filesystem::create_directories(checkpoint_path);
-  std::filesystem::permissions(checkpoint_path,
-                               std::filesystem::perms::owner_all |
-                                   std::filesystem::perms::group_all |
-                                   std::filesystem::perms::others_all,
-                               std::filesystem::perm_options::add);
-
   if (base_index_) {
     std::string findex_path = checkpoint_path + "/" + FINDEX_NAME;
     std::unique_ptr<FileIOWriter> ff =

@@ -48,10 +48,9 @@ Dependecies of HAKES serving includes `libuv` and `llhttp`. We add them as submo
 cd hakes
 make preparation # it will initialize the dependencies of libuv and llhttp
 make server_deps # build libuv and llhttp
-make server
 # build the server executables
 cd serving/fnr-worker
-make 
+make all
 ```
 
 ## Use HAKES
@@ -66,20 +65,19 @@ make all
 ```
 
 ```sh
-./gen_base_params <N> <d> <data-path> <opq_out> <pq_m> <ivf_nlist> <index_save_path> 
+mkdir index_test
+./gen_base_params <N> <d> <data_path> <opq_out> <pq_m> <ivf_nlist> <metric> <index_save_path> 
+# example: ./gen_base_params 1000000 768 sphere-768/train.bin 192 96 1024 0 index_test/findex.bin
+# metric: 0 for ip and 1 for l2
 ```
 
-The generated base parameters is saved as a directory with the following structure:
+The generated base parameters is saved as binary file.
 
-```text
-.
-└── base_index
-    ├── ivf.bin
-    ├── pq.bin
-    └── pre-transform.bin
+Please use `hakes/index/hakes_index.cpp` to instantiate an index on a dataset, evaluate and generate training sample from the index. Check out `hakes_index.cpp` for different way of testing and modify as needed for different range of `nprobe` and `k_factor`.
+
+```sh
+./hakes_index <N> <NQ> <d> <k> <groundtruth_len> <data_path> <query_path> <groundtruth_path> 1 1 1 0 1 100 50 0 <index_dir>
 ```
-
-Please use `hakes/index/hakes_index.cpp` to instantiate an index on a dataset, evaluate and generate training sample from the index.
 
 We provide scripts in `hakes/index/scripts` to demostrate its usage.
 
@@ -92,7 +90,7 @@ Please refer to the README in `hakes/training` for more details.
 Please add the extended faiss dynamic library to your loader path.
 
 ```sh
-UV_THREADPOOL_SIZE=20 ./sample-server-v3 2351 <hakes-serving-dir>
+UV_THREADPOOL_SIZE=20 ./sample-server-v3 2351 <hakes_serving_dir>
 ```
 
 The UV_THREADPOOL_SIZE controls the number of threads used for serving requests.
@@ -103,9 +101,9 @@ The hakes serving directory shall have the following structure. Where the built 
 .
 └── checkpoint_0
     └── base_index
-        ├── ivf.bin
-        ├── pq.bin
-        └── pre-transform.bin
+        ├── findex.bin
+        ├── rindex.bin
+        └── uindex.bin
 ```
 
 Checkpoint requests trigger HAKES to create additional checkpoints under this directory. And when the server is restarted, it will load the latest checkpoint.

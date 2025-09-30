@@ -16,6 +16,8 @@
 
 #include "fnr-worker/hakesexecutor.h"
 
+#include <filesystem>
+
 namespace hakes {
 
 bool HakesExecutor::Initialize(const std::string& index_path, int mode,
@@ -40,9 +42,8 @@ bool HakesExecutor::Add(const ExtendedAddRequest& request,
   std::unique_ptr<float[]> transformed_vecs;
   bool success = false;
   if (request.add_to_refine_only) {
-    success = index_->AddToRefine(request.n, request.d, request.vecs,
-                                  static_cast<faiss::idx_t*>(request.ids),
-                                  static_cast<faiss::idx_t*>(request.assign));
+    success = index_->AddRefine(request.n, request.d, request.vecs,
+                                  static_cast<faiss::idx_t*>(request.ids));
   } else if (request.assigned) {
     std::shared_lock lock(params_mutex_);
     success = index_->AddBasePreassigned(
@@ -208,6 +209,12 @@ bool HakesExecutor::Delete(const DeleteRequest& request,
 
 bool HakesExecutor::Checkpoint(const std::string& checkpoint_path) {
   std::shared_lock lock(params_mutex_);
+  std::filesystem::create_directories(checkpoint_path);
+  std::filesystem::permissions(checkpoint_path,
+                               std::filesystem::perms::owner_all |
+                                   std::filesystem::perms::group_all |
+                                   std::filesystem::perms::others_all,
+                               std::filesystem::perm_options::add);
   return index_->Checkpoint(std::move(checkpoint_path));
 }
 
